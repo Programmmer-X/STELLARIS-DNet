@@ -2,37 +2,30 @@
 # my function
 
 import os
-from getpass import getpass
 
-def auto_push_notebook(repo_path="/content/STELLARIS-DNet",
-                       notebook_name=None,
-                       target_folder="notebooks/experiments",
-                       commit_msg="Auto notebook update",
-                       repo_url="https://github.com/Programmmer-X/STELLARIS-DNet.git"):
+def setup_git():
+    """
+    Run this once per Colab session.
+    Sets Git identity and enables credential storage.
+    """
+    os.system('git config --global user.email "your_email@example.com"')
+    os.system('git config --global user.name "Your Name"')
+    os.system('git config --global credential.helper store')
 
-    TOKEN = getpass("Enter GitHub PAT: ")
+    print("✅ Git configured. You will be asked for token only once during first push.")
 
-    if notebook_name is None:
-        print("⚠️ Please provide notebook_name manually")
-        return
 
-    nb_path = f"/content/{notebook_name}"
-    target_path = f"{repo_path}/{target_folder}"
-
-    os.makedirs(target_path, exist_ok=True)
-
-    os.system(f'cp "{nb_path}" "{target_path}/"')
-
-    os.chdir(repo_path)
-
-# 🔍 Check if there are changes
-    status = os.popen("git status --porcelain").read()
-    if not status.strip():
-         print("⚠️ No changes to commit")
-    return
-
-# 🚀 Proceed only if changes exist
+def git_push(commit_msg="update"):
+    """
+    Adds, commits, and pushes changes to GitHub.
+    """
+    # Add all changes
     os.system("git add .")
+
+    # Commit
     os.system(f'git commit -m "{commit_msg}"')
-    os.system(f'git push https://{TOKEN}@{repo_url.replace("https://", "")} main')
-    print("✅ Notebook pushed successfully!")
+
+    # Push (will ask token only first time)
+    os.system("git push origin main")
+
+    print("🚀 Changes pushed to GitHub successfully!")
