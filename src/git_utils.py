@@ -24,6 +24,14 @@ def auto_push_notebook(repo_path="/content/STELLARIS-DNet",
     os.system(f'cp "{nb_path}" "{target_path}/"')
 
     os.chdir(repo_path)
+
+# 🔍 Check if there are changes
+    status = os.popen("git status --porcelain").read()
+    if not status.strip():
+         print("⚠️ No changes to commit")
+    return
+
+# 🚀 Proceed only if changes exist
     os.system("git add .")
     os.system(f'git commit -m "{commit_msg}"')
     os.system(f'git push https://{TOKEN}@{repo_url.replace("https://", "")} main')
