@@ -10,3 +10,11 @@ A Modular Deep Learning Framework for Stellar Evolution and Compact Objects.
 
 ## Status
 Day 1: Data pipeline setup (Signal Module)
+
+
+## Project Structure
+
+- src/signal → Signal processing and pulsar detection
+- notebooks → Experimentation and development
+- data → Raw and processed datasets
+- outputs → Plots, logs, and model outputs
