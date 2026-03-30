@@ -26,6 +26,5 @@ def auto_push_notebook(repo_path="/content/STELLARIS-DNet",
     os.chdir(repo_path)
     os.system("git add .")
     os.system(f'git commit -m "{commit_msg}"')
-    os.system(f'git push https://{TOKEN}@github.com/Programmmer-X/STELLARIS-DNet.git main')
-
+    os.system(f'git push https://{TOKEN}@{repo_url.replace("https://", "")} main')
     print("✅ Notebook pushed successfully!")
