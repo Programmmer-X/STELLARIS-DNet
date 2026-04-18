@@ -34,6 +34,7 @@ def load_model(model: nn.Module, path: str, device: torch.device) -> nn.Module:
         )
     checkpoint = torch.load(path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(device)   # ← this line was missing
     model.eval()
     print(f"✅ Loaded: {path}")
     return model
