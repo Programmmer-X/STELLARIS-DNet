@@ -19,3 +19,4 @@ runs/
 *.log
 kaggle.json
 venv/
+tempCodeRunnerFile.py
