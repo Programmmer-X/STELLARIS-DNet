@@ -126,8 +126,8 @@ def train_grav_wave(device, logger):
 
     # ReduceLROnPlateau — stable, won't explode like OneCycleLR
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", patience=5,
-        factor=0.5, min_lr=1e-6, verbose=True
+    optimizer, mode="min", patience=5,
+    factor=0.5, min_lr=1e-6
     )
 
     # Balanced class weights — Signal and Noise should be equal
