@@ -13,21 +13,19 @@ import torch.nn as nn
 from tqdm import tqdm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from module2.config      import *
-from module2.dataset_2a  import load_mirabest
-from module2.dataset_2b  import load_g2net
-from module2.model       import RadioGalaxyClassifier, GravWaveDetector
-from core.utils          import (set_seed, get_device, get_logger,
-                                  save_checkpoint, save_encoder,
-                                  EarlyStopping, count_parameters,
-                                  print_epoch)
+from module2.config     import *
+from module2.dataset_2a import load_mirabest
+from module2.dataset_2b import load_g2net
+from module2.model      import RadioGalaxyClassifier, GravWaveDetector
+from core.utils         import (set_seed, get_device, get_logger,
+                                 save_checkpoint, save_encoder,
+                                 EarlyStopping, count_parameters,
+                                 print_epoch)
 
 
 # ─────────────────────────────────────────────
 # 1. TRAIN RADIO GALAXY CLASSIFIER (2A)
-# Staged training:
-#   Phase 1: freeze backbone → train head only
-#   Phase 2: unfreeze last blocks → fine-tune
+# Staged: freeze backbone → train head → unfreeze
 # ─────────────────────────────────────────────
 def train_radio_galaxy(device, logger):
     logger.info("=" * 50)
@@ -35,11 +33,9 @@ def train_radio_galaxy(device, logger):
     logger.info("=" * 50)
 
     train_loader, val_loader, _ = load_mirabest()
-
     model = RadioGalaxyClassifier(pretrained=True).to(device)
     count_parameters(model)
 
-    # Two parameter groups — different LRs
     head_params     = list(model.encoder.parameters()) + \
                       list(model.head.parameters())
     backbone_params = list(model.backbone.parameters())
@@ -54,44 +50,36 @@ def train_radio_galaxy(device, logger):
     )
     criterion  = nn.CrossEntropyLoss(label_smoothing=0.1)
     early_stop = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
-
     best_val_loss = float("inf")
     best_val_acc  = 0.0
 
     for epoch in range(1, RGZ_EPOCHS + 1):
-
-        # ── Phase switch: unfreeze after freeze epochs ──
         if epoch == RGZ_FREEZE_EPOCHS + 1:
             model.unfreeze_last_blocks(n_blocks=2)
             logger.info(f"Epoch {epoch}: Unfreezing last 2 backbone blocks")
 
-        # ── Train ──
+        # Train
         model.train()
         train_loss = 0.0
-        for X, y in tqdm(train_loader, desc=f"RGC Epoch {epoch}", leave=False):
+        for X, y in tqdm(train_loader, desc=f"RGC {epoch}", leave=False):
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
-            out  = model(X)
-            loss = criterion(out, y)
+            loss = criterion(model(X), y)
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
-        # ── Validate ──
+        # Validate
         model.eval()
-        val_loss = 0.0
-        correct  = 0
-        total    = 0
+        val_loss = correct = total = 0
         with torch.no_grad():
             for X, y in val_loader:
                 X, y  = X.to(device), y.to(device)
                 out   = model(X)
-                loss  = criterion(out, y)
-                val_loss += loss.item()
-                preds    = out.argmax(dim=1)
-                correct  += (preds == y).sum().item()
+                val_loss += criterion(out, y).item()
+                correct  += (out.argmax(1) == y).sum().item()
                 total    += y.size(0)
         val_loss /= len(val_loader)
         val_acc   = correct / total
@@ -118,6 +106,8 @@ def train_radio_galaxy(device, logger):
 
 # ─────────────────────────────────────────────
 # 2. TRAIN GRAVITATIONAL WAVE DETECTOR (2B)
+# Fixed: ReduceLROnPlateau instead of OneCycleLR
+# Fixed: lower LR (1e-4), class weights for balance
 # ─────────────────────────────────────────────
 def train_grav_wave(device, logger):
     logger.info("=" * 50)
@@ -125,71 +115,75 @@ def train_grav_wave(device, logger):
     logger.info("=" * 50)
 
     train_loader, val_loader, _ = load_g2net()
-
-    model     = GravWaveDetector().to(device)
+    model = GravWaveDetector().to(device)
     count_parameters(model)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=LIGO_LR,
+        lr=LIGO_LR,                 # 1e-4 — fixed from 1e-3
         weight_decay=LIGO_WEIGHT_DECAY
     )
-    scheduler  = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=LIGO_LR,
-        epochs=LIGO_EPOCHS,
-        steps_per_epoch=len(train_loader)
+
+    # ReduceLROnPlateau — stable, won't explode like OneCycleLR
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", patience=5,
+        factor=0.5, min_lr=1e-6, verbose=True
     )
-    criterion  = nn.CrossEntropyLoss()
-    early_stop = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
+
+    # Balanced class weights — Signal and Noise should be equal
+    class_weights = torch.tensor([1.0, 1.0], dtype=torch.float32).to(device)
+    criterion     = nn.CrossEntropyLoss(weight=class_weights)
+    early_stop    = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
 
     best_val_loss = float("inf")
     best_val_acc  = 0.0
 
     for epoch in range(1, LIGO_EPOCHS + 1):
-
-        # ── Train ──
+        # Train
         model.train()
         train_loss = 0.0
-        for X, y in tqdm(train_loader, desc=f"GWD Epoch {epoch}", leave=False):
+        for X, y in tqdm(train_loader, desc=f"GWD {epoch}", leave=False):
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
-            out  = model(X)
-            loss = criterion(out, y)
+            loss = criterion(model(X), y)
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.5)
             optimizer.step()
-            scheduler.step()
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
-        # ── Validate ──
+        # Validate
         model.eval()
-        val_loss = 0.0
-        correct  = 0
-        total    = 0
+        val_loss = correct = total = 0
+        pred_counts = {0: 0, 1: 0}
         with torch.no_grad():
             for X, y in val_loader:
                 X, y  = X.to(device), y.to(device)
                 out   = model(X)
-                loss  = criterion(out, y)
-                val_loss += loss.item()
-                preds    = out.argmax(dim=1)
-                correct  += (preds == y).sum().item()
-                total    += y.size(0)
+                val_loss += criterion(out, y).item()
+                preds = out.argmax(1)
+                correct += (preds == y).sum().item()
+                total   += y.size(0)
+                for p in preds.cpu().tolist():
+                    pred_counts[p] = pred_counts.get(p, 0) + 1
         val_loss /= len(val_loader)
         val_acc   = correct / total
 
-        print_epoch(epoch, LIGO_EPOCHS, train_loss, val_loss, val_acc)
+        scheduler.step(val_loss)
+        print_epoch(epoch, LIGO_EPOCHS, train_loss, val_loss, val_acc,
+                    extra={"N_pred": pred_counts.get(0, 0),
+                           "S_pred": pred_counts.get(1, 0)})
         logger.info(f"Epoch {epoch} | train={train_loss:.4f} "
-                    f"val={val_loss:.4f} acc={val_acc:.4f}")
+                    f"val={val_loss:.4f} acc={val_acc:.4f} "
+                    f"preds={pred_counts}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_val_acc  = val_acc
             save_checkpoint(model, optimizer, epoch, val_loss,
                             CHECKPOINT_DIR, "gwd_best.pt")
-            save_encoder(model.conv_encoder, CHECKPOINT_DIR, "gwd_encoder.pt")
+            save_encoder(model.conv_encoder, CHECKPOINT_DIR,
+                         "gwd_encoder.pt")
 
         if early_stop(val_loss):
             break
