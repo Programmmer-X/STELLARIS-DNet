@@ -1,11 +1,15 @@
 """
 module2/dataset_2b.py
 STELLARIS-DNet — Module 2B Data Pipeline
-G2Net Gravitational Wave Detection
+G2Net Gravitational Wave Detection — REAL DATA ONLY
+CQT Spectrogram → EfficientNet-B0
 Binary: Noise(0) / Signal(1)
 
-Key fix: G2Net data is already whitened strain.
-Use robust normalization, not bandpass filter.
+Strategy:
+1. Load real G2Net .npy strain files
+2. Compute CQT spectrograms
+3. Cache to disk (one-time cost)
+4. Load from cache for all subsequent training
 """
 
 import os
@@ -21,7 +25,7 @@ from module2.config import (
     SEED, LIGO_DATA_DIR, LIGO_CLASSES, LIGO_NUM_CLASSES,
     LIGO_N_DETECTORS, LIGO_SIGNAL_LEN, LIGO_BATCH_SIZE,
     LIGO_TEST_SPLIT, LIGO_VAL_SPLIT, LIGO_MAX_SAMPLES,
-    GW_FREQ_MIN, GW_FREQ_MAX
+    LIGO_CQT_BINS, LIGO_CQT_STEPS, GW_FREQ_MIN, GW_FREQ_MAX
 )
 
 
@@ -35,46 +39,7 @@ def _resolve_data_dir(data_dir: str) -> str:
     return data_dir
 
 
-# ─────────────────────────────────────────────
-# 1. PREPROCESSING
-# G2Net data is already whitened — use robust normalization
-# ─────────────────────────────────────────────
-def _preprocess_signal(signal: np.ndarray) -> np.ndarray:
-    """
-    Correct preprocessing for G2Net whitened strain data.
-    Input shape: (3, 4096) — already whitened by LIGO pipeline
-    
-    Key insight: G2Net signals are pre-whitened with extreme values.
-    Standard normalization fails. Use robust MAD-based scaling.
-    """
-    result = np.zeros_like(signal, dtype=np.float32)
-    for i in range(signal.shape[0]):
-        ch = signal[i].astype(np.float64)
-        # Remove DC offset
-        ch = ch - ch.mean()
-        # Robust scale: median absolute deviation
-        mad = np.median(np.abs(ch - np.median(ch)))
-        if mad > 1e-10:
-            ch = ch / (mad * 1.4826)  # normalize to unit variance
-        else:
-            std = ch.std()
-            if std > 1e-10:
-                ch = ch / std
-        # Clip extreme outliers — preserves GW signal shape
-        ch = np.clip(ch, -20.0, 20.0)
-        # Final rescale to [-1, 1]
-        mx = np.abs(ch).max()
-        if mx > 1e-10:
-            ch = ch / mx
-        result[i] = ch.astype(np.float32)
-    return result
-
-
-# ─────────────────────────────────────────────
-# 2. G2NET FILE PATH
-# ─────────────────────────────────────────────
 def _get_file_path(file_id: str, data_dir: str) -> str:
-    """G2Net: nested dirs by first 3 chars of id."""
     return os.path.join(
         data_dir, "train",
         file_id[0], file_id[1], file_id[2],
@@ -83,247 +48,270 @@ def _get_file_path(file_id: str, data_dir: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# 3. REAL G2NET DATASET
+# 1. SIGNAL PROCESSING PIPELINE
 # ─────────────────────────────────────────────
-class G2NetDataset(Dataset):
-    def __init__(self, file_ids: list, labels: np.ndarray,
-                 data_dir: str, train: bool = False):
-        self.file_ids = file_ids
-        self.labels   = torch.tensor(labels, dtype=torch.long)
-        self.data_dir = data_dir
-        self.train    = train
-
-    def __len__(self):
-        return len(self.file_ids)
-
-    def __getitem__(self, idx):
-        fid    = self.file_ids[idx]
-        path   = _get_file_path(fid, self.data_dir)
-        signal = np.load(path).astype(np.float32)   # (3, 4096)
-        signal = _preprocess_signal(signal)
-        if self.train:
-            signal = self._augment(signal)
-        return torch.tensor(signal, dtype=torch.float32), self.labels[idx]
-
-    def _augment(self, signal: np.ndarray) -> np.ndarray:
-        """Physics-aware augmentation for GW signals."""
-        # Small time shift — GW arrives at detectors at different times
-        shift = np.random.randint(-20, 20)
-        signal = np.roll(signal, shift, axis=-1)
-        # Small amplitude scaling ±5%
-        signal = signal * np.random.uniform(0.95, 1.05)
-        # Gaussian noise injection (very small)
-        signal = signal + np.random.randn(*signal.shape).astype(np.float32) * 0.01
-        return np.clip(signal, -1.0, 1.0)
+def _whiten(signal: np.ndarray, fs: float = 2048.0) -> np.ndarray:
+    """Whiten signal by dividing by estimated PSD."""
+    n   = signal.shape[-1]
+    fft = np.fft.rfft(signal, axis=-1)
+    psd = np.abs(fft) ** 2
+    # Smooth PSD
+    kernel = np.ones(10) / 10
+    for i in range(signal.shape[0]):
+        psd[i] = np.convolve(psd[i], kernel, mode='same')
+        psd[i] = np.maximum(psd[i], 1e-20)
+    return np.fft.irfft(fft / np.sqrt(psd), n=n, axis=-1).astype(np.float32)
 
 
-# ─────────────────────────────────────────────
-# 4. PRELOADED DATASET — loads all data into RAM
-# Much faster than loading .npy per sample
-# ─────────────────────────────────────────────
-class G2NetPreloadedDataset(Dataset):
+def _bandpass(signal: np.ndarray,
+              low: float = GW_FREQ_MIN,
+              high: float = GW_FREQ_MAX,
+              fs: float = 2048.0) -> np.ndarray:
+    """FFT bandpass: keep only GW sensitive band 20-500 Hz."""
+    n     = signal.shape[-1]
+    freqs = np.fft.rfftfreq(n, d=1.0/fs)
+    fft   = np.fft.rfft(signal, axis=-1)
+    mask  = (freqs >= low) & (freqs <= high)
+    fft[..., ~mask] = 0
+    return np.fft.irfft(fft, n=n, axis=-1).astype(np.float32)
+
+
+def _cqt(signal: np.ndarray,
+         fs: float = 2048.0,
+         n_bins: int = LIGO_CQT_BINS,
+         n_steps: int = LIGO_CQT_STEPS,
+         f_min: float = GW_FREQ_MIN,
+         f_max: float = GW_FREQ_MAX) -> np.ndarray:
     """
-    Preloads all signals into RAM for fast training.
-    Use when max_samples <= 10000 (fits in ~480MB RAM).
+    Constant-Q Transform — logarithmically spaced frequency bins.
+    GW chirp sweeps from f_min to f_max — visible as curved track.
+    Output: (n_detectors, n_bins, n_steps)
     """
-    def __init__(self, file_ids: list, labels: np.ndarray,
-                 data_dir: str, train: bool = False):
+    n_det = signal.shape[0]
+    n_sig = signal.shape[1]
+    freqs = np.logspace(np.log10(f_min), np.log10(f_max), n_bins)
+    hop   = max(1, n_sig // n_steps)
+    times = np.linspace(0, n_sig - hop, n_steps, dtype=int)
+    spec  = np.zeros((n_det, n_bins, len(times)), dtype=np.float32)
+    t_arr = np.arange(n_sig) / fs
+
+    for fi, freq in enumerate(freqs):
+        Q      = 8.0
+        sigma  = 1.0 / (2 * np.pi * freq / Q)
+        t_ctr  = t_arr[n_sig // 2]
+        window = np.exp(-0.5 * ((t_arr - t_ctr) / sigma) ** 2)
+        wavelet_r = window * np.cos(2 * np.pi * freq * t_arr)
+        wavelet_i = window * np.sin(2 * np.pi * freq * t_arr)
+
+        for det in range(n_det):
+            conv_r = np.convolve(signal[det], wavelet_r[::-1], mode='same')
+            conv_i = np.convolve(signal[det], wavelet_i[::-1], mode='same')
+            amp    = np.sqrt(conv_r ** 2 + conv_i ** 2)
+            for ti, t_idx in enumerate(times):
+                spec[det, fi, ti] = amp[t_idx]
+
+    return spec
+
+
+def _normalize_spec(spec: np.ndarray) -> np.ndarray:
+    """Normalize to [0,1] then apply ImageNet stats for EfficientNet."""
+    result = np.zeros_like(spec, dtype=np.float32)
+    for i in range(spec.shape[0]):
+        mn, mx = spec[i].min(), spec[i].max()
+        if mx - mn > 1e-8:
+            result[i] = (spec[i] - mn) / (mx - mn)
+    # ImageNet normalization
+    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+    std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+    return (result - mean) / std
+
+
+def signal_to_spectrogram(signal: np.ndarray) -> np.ndarray:
+    """
+    Full pipeline: raw strain → CQT spectrogram
+    Input:  (3, 4096)
+    Output: (3, LIGO_CQT_BINS, LIGO_CQT_STEPS)
+    """
+    signal = _whiten(signal)
+    signal = _bandpass(signal)
+    spec   = _cqt(signal)
+    spec   = _normalize_spec(spec)
+    return spec
+
+
+# ─────────────────────────────────────────────
+# 2. PRECOMPUTE + CACHE
+# Compute CQT once, save to disk, load fast after
+# ─────────────────────────────────────────────
+def precompute_cqt_cache(file_ids: list, labels: np.ndarray,
+                          data_dir: str, cache_path: str) -> bool:
+    """
+    Precomputes CQT spectrograms for all files and saves to .npz cache.
+    Returns True if successful.
+    """
+    print(f"   Computing CQT for {len(file_ids)} samples...")
+    print(f"   This runs ONCE then loads from cache.")
+
+    specs     = []
+    valid_idx = []
+
+    for i, fid in enumerate(file_ids):
+        try:
+            path   = _get_file_path(fid, data_dir)
+            signal = np.load(path).astype(np.float32)
+            spec   = signal_to_spectrogram(signal)
+            specs.append(spec)
+            valid_idx.append(i)
+            if (i + 1) % 200 == 0:
+                print(f"   [{i+1}/{len(file_ids)}] done...")
+        except Exception as e:
+            continue
+
+    if len(specs) == 0:
+        print("❌ No files could be processed")
+        return False
+
+    specs      = np.array(specs, dtype=np.float32)
+    labels_out = labels[valid_idx]
+
+    np.savez_compressed(cache_path, specs=specs, labels=labels_out)
+    print(f"✅ Cache saved: {cache_path}")
+    print(f"   Shape: {specs.shape} | "
+          f"Signal: {(labels_out==1).sum()} | "
+          f"Noise: {(labels_out==0).sum()}")
+    return True
+
+
+def load_cqt_cache(cache_path: str):
+    """Load precomputed CQT cache."""
+    data   = np.load(cache_path)
+    specs  = data["specs"]
+    labels = data["labels"]
+    print(f"✅ Cache loaded: {cache_path}")
+    print(f"   Shape: {specs.shape} | "
+          f"Signal: {(labels==1).sum()} | "
+          f"Noise: {(labels==0).sum()}")
+    return specs, labels
+
+
+# ─────────────────────────────────────────────
+# 3. DATASET CLASS
+# ─────────────────────────────────────────────
+class G2NetCQTDataset(Dataset):
+    def __init__(self, specs: np.ndarray, labels: np.ndarray,
+                 train: bool = False):
+        self.specs  = specs
         self.labels = torch.tensor(labels, dtype=torch.long)
         self.train  = train
 
-        print(f"   Preloading {len(file_ids)} signals into RAM...")
-        signals = []
-        valid_idx = []
-        for i, fid in enumerate(file_ids):
-            path = _get_file_path(fid, data_dir)
-            try:
-                sig = np.load(path).astype(np.float32)
-                sig = _preprocess_signal(sig)
-                signals.append(sig)
-                valid_idx.append(i)
-            except Exception:
-                continue
-
-        self.signals = np.array(signals, dtype=np.float32)
-        self.labels  = self.labels[valid_idx]
-        print(f"   Loaded: {len(self.signals)} signals | "
-              f"Signal: {self.labels.sum().item()} | "
-              f"Noise: {(self.labels==0).sum().item()}")
-
     def __len__(self):
-        return len(self.signals)
+        return len(self.specs)
 
     def __getitem__(self, idx):
-        signal = self.signals[idx].copy()
+        spec = self.specs[idx].copy()
         if self.train:
-            shift  = np.random.randint(-20, 20)
-            signal = np.roll(signal, shift, axis=-1)
-            signal = signal * np.random.uniform(0.95, 1.05)
-            signal = signal + np.random.randn(*signal.shape).astype(np.float32) * 0.01
-            signal = np.clip(signal, -1.0, 1.0)
-        return torch.tensor(signal, dtype=torch.float32), self.labels[idx]
+            # Time shift in spectrogram domain
+            shift = np.random.randint(-3, 3)
+            spec  = np.roll(spec, shift, axis=2)
+            # Amplitude scale
+            spec  = spec * np.random.uniform(0.95, 1.05)
+            # Horizontal flip (time reversal)
+            if np.random.rand() > 0.5:
+                spec = spec[:, :, ::-1].copy()
+        return torch.tensor(spec, dtype=torch.float32), self.labels[idx]
 
 
 # ─────────────────────────────────────────────
-# 5. SYNTHETIC DATASET — fallback
-# ─────────────────────────────────────────────
-class SyntheticG2NetDataset(Dataset):
-    def __init__(self, n_samples: int, labels: np.ndarray,
-                 train: bool = False):
-        self.labels  = torch.tensor(labels, dtype=torch.long)
-        self.train   = train
-        np.random.seed(SEED)
-        self.signals = self._generate(n_samples, labels)
-
-    def _generate(self, n: int, labels: np.ndarray) -> np.ndarray:
-        signals = np.zeros(
-            (n, LIGO_N_DETECTORS, LIGO_SIGNAL_LEN), dtype=np.float32
-        )
-        for i in range(n):
-            # Colored noise base
-            noise = np.zeros(
-                (LIGO_N_DETECTORS, LIGO_SIGNAL_LEN), dtype=np.float32
-            )
-            for ch in range(LIGO_N_DETECTORS):
-                raw  = np.random.randn(LIGO_SIGNAL_LEN)
-                fft  = np.fft.rfft(raw)
-                freq = np.fft.rfftfreq(LIGO_SIGNAL_LEN)
-                freq[0] = 1e-10
-                fft  = fft / np.sqrt(np.abs(freq))
-                filtered = np.fft.irfft(fft, LIGO_SIGNAL_LEN)
-                std  = filtered.std()
-                if std > 1e-10:
-                    filtered /= std
-                noise[ch] = filtered.astype(np.float32)
-
-            if labels[i] == 1:
-                # GW chirp
-                t     = np.linspace(0, 2, LIGO_SIGNAL_LEN)
-                phase = 2 * np.pi * (20.0 * t + 70.0 * t**2)
-                amp   = np.exp(3 * (t - 2))
-                chirp = (amp * np.sin(phase)).astype(np.float32)
-                std   = chirp.std()
-                if std > 1e-10:
-                    chirp = chirp / std
-                for ch in range(LIGO_N_DETECTORS):
-                    offset = np.random.randint(-15, 15)
-                    signals[i, ch] = noise[ch] + 0.8 * np.roll(chirp, offset)
-            else:
-                signals[i] = noise
-
-            # Apply same preprocessing
-            signals[i] = _preprocess_signal(signals[i])
-
-        return signals
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, idx):
-        signal = self.signals[idx].copy()
-        if self.train:
-            shift  = np.random.randint(-20, 20)
-            signal = np.roll(signal, shift, axis=-1)
-        return torch.tensor(signal, dtype=torch.float32), self.labels[idx]
-
-
-# ─────────────────────────────────────────────
-# 6. DATALOADER FACTORY
+# 4. DATALOADER FACTORY
 # ─────────────────────────────────────────────
 def load_g2net(data_dir: str = None, max_samples: int = LIGO_MAX_SAMPLES):
     if data_dir is None:
         data_dir = _resolve_data_dir(LIGO_DATA_DIR)
 
     labels_path = os.path.join(data_dir, "training_labels.csv")
+    cache_path  = os.path.join(data_dir, f"cqt_cache_{max_samples}.npz")
 
-    if os.path.exists(labels_path):
-        print("✅ G2Net labels found — loading real data")
+    if not os.path.exists(labels_path):
+        raise FileNotFoundError(
+            f"G2Net labels not found at: {labels_path}\n"
+            f"Add G2Net competition data to Kaggle notebook inputs."
+        )
+
+    # ── Load or build cache ────────────────────
+    if os.path.exists(cache_path):
+        print(f"✅ Loading from cache: {cache_path}")
+        specs, labels = load_cqt_cache(cache_path)
+    else:
+        print("📡 Building CQT cache (one-time)...")
         df = pd.read_csv(labels_path)
 
-        if len(df) > max_samples:
-            # Stratified sample to keep 50/50 balance
-            df_signal = df[df["target"] == 1].sample(
-                max_samples // 2, random_state=SEED)
-            df_noise   = df[df["target"] == 0].sample(
-                max_samples // 2, random_state=SEED)
-            df = pd.concat([df_signal, df_noise]).sample(
-                frac=1, random_state=SEED)
-            print(f"   Balanced sample: {max_samples} total")
+        # Balanced stratified sample
+        half = min(
+            max_samples // 2,
+            (df["target"] == 0).sum(),
+            (df["target"] == 1).sum()
+        )
+        df = pd.concat([
+            df[df["target"] == 0].sample(half, random_state=SEED),
+            df[df["target"] == 1].sample(half, random_state=SEED)
+        ]).sample(frac=1, random_state=SEED).reset_index(drop=True)
 
         file_ids = df["id"].tolist()
         labels   = df["target"].values.astype(np.int64)
 
-        # Verify files exist
-        valid = [
-            i for i, fid in enumerate(file_ids)
-            if os.path.exists(_get_file_path(fid, data_dir))
-        ]
+        # Filter to existing files
+        valid    = [i for i, fid in enumerate(file_ids)
+                    if os.path.exists(_get_file_path(fid, data_dir))]
 
         if len(valid) == 0:
-            print("⚠️  No .npy files found — using synthetic")
-            return _synthetic_loaders()
+            raise FileNotFoundError(
+                f"G2Net .npy files not found in {data_dir}/train/\n"
+                f"Ensure G2Net train folder is symlinked correctly."
+            )
 
         file_ids = [file_ids[i] for i in valid]
         labels   = labels[valid]
-        print(f"   Valid: {len(file_ids)} | "
-              f"Signal: {labels.sum()} | Noise: {(labels==0).sum()}")
 
-        # Split
-        ids_tr, ids_te, y_tr, y_te = train_test_split(
-            file_ids, labels, test_size=LIGO_TEST_SPLIT,
-            random_state=SEED, stratify=labels
-        )
-        ids_tr, ids_vl, y_tr, y_vl = train_test_split(
-            ids_tr, y_tr,
-            test_size=LIGO_VAL_SPLIT / (1 - LIGO_TEST_SPLIT),
-            random_state=SEED, stratify=y_tr
-        )
+        success = precompute_cqt_cache(file_ids, labels,
+                                        data_dir, cache_path)
+        if not success:
+            raise RuntimeError("CQT precomputation failed.")
 
-        # Use preloaded for speed
-        train_ds = G2NetPreloadedDataset(ids_tr, y_tr, data_dir, train=True)
-        val_ds   = G2NetPreloadedDataset(ids_vl, y_vl, data_dir, train=False)
-        test_ds  = G2NetPreloadedDataset(ids_te, y_te, data_dir, train=False)
+        specs, labels = load_cqt_cache(cache_path)
 
-    else:
-        print("⚠️  G2Net not found — using synthetic GW signals")
-        return _synthetic_loaders()
+    # ── Split ──────────────────────────────────
+    n       = len(specs)
+    idx_arr = np.arange(n)
+    idx_tr, idx_te, y_tr, y_te = train_test_split(
+        idx_arr, labels, test_size=LIGO_TEST_SPLIT,
+        random_state=SEED, stratify=labels
+    )
+    idx_tr, idx_vl, y_tr, y_vl = train_test_split(
+        idx_tr, y_tr,
+        test_size=LIGO_VAL_SPLIT / (1 - LIGO_TEST_SPLIT),
+        random_state=SEED, stratify=y_tr
+    )
 
-    train_loader = DataLoader(train_ds, batch_size=LIGO_BATCH_SIZE,
-                              shuffle=True, drop_last=True, num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=LIGO_BATCH_SIZE,
-                              shuffle=False, num_workers=0)
-    test_loader  = DataLoader(test_ds,  batch_size=LIGO_BATCH_SIZE,
-                              shuffle=False, num_workers=0)
+    train_ds = G2NetCQTDataset(specs[idx_tr], y_tr, train=True)
+    val_ds   = G2NetCQTDataset(specs[idx_vl], y_vl, train=False)
+    test_ds  = G2NetCQTDataset(specs[idx_te], y_te, train=False)
 
-    print(f"   Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
-    return train_loader, val_loader, test_loader
+    print(f"   Train: {len(train_ds)} | "
+          f"Val: {len(val_ds)} | Test: {len(test_ds)}")
 
+    train_loader = DataLoader(
+        train_ds, batch_size=LIGO_BATCH_SIZE,
+        shuffle=True, drop_last=True, num_workers=0
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=LIGO_BATCH_SIZE,
+        shuffle=False, num_workers=0
+    )
+    test_loader = DataLoader(
+        test_ds, batch_size=LIGO_BATCH_SIZE,
+        shuffle=False, num_workers=0
+    )
 
-def _synthetic_loaders():
-    n      = 2000
-    labels = np.array([0]*(n//2) + [1]*(n//2))
-    np.random.shuffle(labels)
-
-    n_test  = int(n * LIGO_TEST_SPLIT)
-    n_val   = int(n * LIGO_VAL_SPLIT)
-    n_train = n - n_test - n_val
-    idx     = np.random.permutation(n)
-
-    train_ds = SyntheticG2NetDataset(
-        n_train, labels[idx[:n_train]], train=True)
-    val_ds   = SyntheticG2NetDataset(
-        n_val, labels[idx[n_train:n_train+n_val]], train=False)
-    test_ds  = SyntheticG2NetDataset(
-        n_test, labels[idx[n_train+n_val:]], train=False)
-
-    train_loader = DataLoader(train_ds, batch_size=LIGO_BATCH_SIZE,
-                              shuffle=True, drop_last=True, num_workers=0)
-    val_loader   = DataLoader(val_ds,   batch_size=LIGO_BATCH_SIZE,
-                              shuffle=False, num_workers=0)
-    test_loader  = DataLoader(test_ds,  batch_size=LIGO_BATCH_SIZE,
-                              shuffle=False, num_workers=0)
-
-    print(f"   Train: {n_train} | Val: {n_val} | Test: {n_test}")
     return train_loader, val_loader, test_loader
 
 
@@ -332,17 +320,21 @@ def _synthetic_loaders():
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 50)
-    print("Module 2B Dataset Sanity Check")
+    print("Module 2B — CQT Pipeline Test (single sample)")
     print("=" * 50)
-    try:
-        tr, vl, te = load_g2net()
-        X, y = next(iter(tr))
-        print(f"\nBatch shape : {X.shape}")
-        print(f"Label shape : {y.shape}")
-        print(f"Signal/Noise: {(y==1).sum()}/{(y==0).sum()} in batch")
-        print(f"Signal range: [{X.min():.3f}, {X.max():.3f}]")
-        assert X.shape[1:] == (LIGO_N_DETECTORS, LIGO_SIGNAL_LEN)
-        print("\n✅ dataset_2b.py OK")
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
+
+    import numpy as np
+
+    # Test CQT on one random signal
+    print("\n── Single signal CQT test ──")
+    sig  = np.random.randn(3, 4096).astype(np.float32)
+    spec = signal_to_spectrogram(sig)
+    print(f"Input  shape: {sig.shape}")
+    print(f"Output shape: {spec.shape}")
+    print(f"Value  range: [{spec.min():.3f}, {spec.max():.3f}]")
+    assert spec.shape == (LIGO_N_DETECTORS, LIGO_CQT_BINS, LIGO_CQT_STEPS), \
+        f"Wrong shape: {spec.shape}"
+    print("\n✅ CQT pipeline OK")
+    print("✅ dataset_2b.py ready — real G2Net only")
+    print("\nNote: Full dataloader test requires G2Net data.")
+    print("Run on Kaggle with G2Net competition dataset added.")

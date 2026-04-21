@@ -1,8 +1,9 @@
 """
 module2/config.py
 STELLARIS-DNet — Module 2 Hyperparameters
-Sub-task 2A: MiraBest Radio Galaxies (EfficientNet-B0)
-Sub-task 2B: G2Net Gravitational Wave (1D CNN)
+Both 2A and 2B use EfficientNet-B0
+2A: Radio galaxy images
+2B: GW CQT spectrograms
 """
 
 # ─────────────────────────────────────────────
@@ -14,15 +15,19 @@ CHECKPOINT_DIR = "checkpoints/module2"
 LOG_DIR        = "logs/module2"
 
 # ─────────────────────────────────────────────
-# DATASET PATHS — simple constants only
-# Kaggle path resolution happens in dataset files
+# DATASET PATHS
 # ─────────────────────────────────────────────
 RGZ_DATA_DIR  = "data/module2/mirabest"
 LIGO_DATA_DIR = "data/module2/ligo"
 
 # ─────────────────────────────────────────────
+# SHARED EFFICIENTNET SETTINGS
+# Both 2A and 2B use these for the backbone
+# ─────────────────────────────────────────────
+ENCODER_DIM   = 256    # unified encoder dim for both tasks
+
+# ─────────────────────────────────────────────
 # SUB-TASK 2A — MIRABEST RADIO GALAXIES
-# EfficientNet-B0, transfer learning
 # ─────────────────────────────────────────────
 RGZ_CLASSES       = ["FRI", "FRII"]
 RGZ_NUM_CLASSES   = 2
@@ -38,28 +43,33 @@ RGZ_DROPOUT       = 0.5
 RGZ_FREEZE_EPOCHS = 10
 RGZ_TEST_SPLIT    = 0.15
 RGZ_VAL_SPLIT     = 0.15
-RGZ_ENCODER_DIM   = 256
+RGZ_ENCODER_DIM   = ENCODER_DIM
 
 # ─────────────────────────────────────────────
 # SUB-TASK 2B — G2NET GRAVITATIONAL WAVES
-# 1D CNN on whitened strain data
-# Binary: Noise(0) / Signal(1)
+# EfficientNet-B0 on CQT spectrograms
 # ─────────────────────────────────────────────
-LIGO_CLASSES      = ["Noise", "Signal"]
-LIGO_NUM_CLASSES  = 2
-LIGO_N_DETECTORS  = 3          # H1, L1, V1
-LIGO_SIGNAL_LEN   = 4096       # samples per observation
-LIGO_EPOCHS       = 50
-LIGO_BATCH_SIZE   = 64
-LIGO_LR           = 1e-4       # FIXED: was 1e-3, too high
-LIGO_WEIGHT_DECAY = 1e-4
-LIGO_DROPOUT      = 0.3
-LIGO_CHANNELS     = [64, 128, 256, 256]
-LIGO_KERNEL_SIZES = [15, 11, 7, 5]
-LIGO_ENCODER_DIM  = 256
-LIGO_TEST_SPLIT   = 0.15
-LIGO_VAL_SPLIT    = 0.15
-LIGO_MAX_SAMPLES  = 10000      # limit for memory
+LIGO_CLASSES       = ["Noise", "Signal"]
+LIGO_NUM_CLASSES   = 2
+LIGO_N_DETECTORS   = 3          # H1, L1, V1
+LIGO_SIGNAL_LEN    = 4096       # samples per observation
+
+# CQT Spectrogram output shape
+LIGO_CQT_BINS      = 64         # frequency bins (height)
+LIGO_CQT_STEPS     = 64         # time steps (width)
+LIGO_IMG_SIZE      = 224        # resize to EfficientNet input
+
+LIGO_EPOCHS        = 50
+LIGO_BATCH_SIZE    = 32
+LIGO_LR            = 1e-4
+LIGO_LR_BACKBONE   = 1e-5
+LIGO_WEIGHT_DECAY  = 1e-3
+LIGO_DROPOUT       = 0.5
+LIGO_FREEZE_EPOCHS = 10
+LIGO_TEST_SPLIT    = 0.15
+LIGO_VAL_SPLIT     = 0.15
+LIGO_ENCODER_DIM   = ENCODER_DIM
+LIGO_MAX_SAMPLES   = 4000       # keep manageable for CQT compute
 
 # ─────────────────────────────────────────────
 # EARLY STOPPING
@@ -71,5 +81,5 @@ MIN_DELTA = 1e-4
 # PHYSICS BOUNDARIES
 # ─────────────────────────────────────────────
 FRI_FRII_POWER_BOUNDARY = 1e25   # W/Hz
-GW_FREQ_MIN = 20                 # Hz
-GW_FREQ_MAX = 500                # Hz
+GW_FREQ_MIN = 20                 # Hz — LIGO lower cutoff
+GW_FREQ_MAX = 500                # Hz — LIGO upper cutoff
