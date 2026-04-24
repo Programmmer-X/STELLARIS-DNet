@@ -264,14 +264,19 @@ def train_mlp(device, logger, tag: str = EXPERIMENT_TAG):
             # Note: HTRU2 features are statistical — no raw P/Ṗ available.
             # We use feature[0] (mean IP) as period proxy only for loss shape.
             if USE_PHYSICS_LOSS:
-                # Proxy: treat feature indices 0,1 as period/pdot proxies
-                # Real physics loss only meaningful when raw timing is available
-                P_proxy    = torch.sigmoid(X[:, 0]).clamp(PERIOD_MIN, PERIOD_MAX)
-                Pdot_proxy = torch.sigmoid(X[:, 1]) * 1e-15
-                E_proxy    = model.get_features(X).norm(dim=1, keepdim=True)
-                phys_loss  = spindown_energy_loss(E_proxy.squeeze(1),
-                                                  P_proxy, Pdot_proxy)
-                loss = loss + SPINDOWN_LOSS_WEIGHT * phys_loss
+                with torch.no_grad():          # compute proxy without gradient risk
+                    P_proxy    = torch.sigmoid(X[:, 0]).clamp(PERIOD_MIN, PERIOD_MAX)
+                    Pdot_proxy = torch.sigmoid(X[:, 1]) * 1e-15
+                E_proxy   = model.get_features(X).norm(dim=1)   # (B,)
+                # Normalize I to float32-safe range before computing loss
+                # Use dimensionless ratio: E_pred / E_expected
+                E_expected = (4 * torch.pi**2 * torch.abs(Pdot_proxy)) / (P_proxy**3)
+                # Both are now O(1) — no 1e45 overflow
+                E_proxy_norm    = E_proxy    / (E_proxy.detach().mean().clamp(min=1e-8))
+                E_expected_norm = E_expected / (E_expected.detach().mean().clamp(min=1e-8))
+                phys_loss = F.mse_loss(E_proxy_norm, E_expected_norm.detach())
+                if torch.isfinite(phys_loss):
+                    loss = loss + SPINDOWN_LOSS_WEIGHT * phys_loss
 
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -665,16 +670,17 @@ if __name__ == "__main__":
     logger.info(f"Freq Fusion  : {USE_FREQ_FUSION}")
     logger.info(f"Augmentation : {USE_AUGMENTATION}")
 
-    if RUN_COMPARISON := (RUN_BASELINE and RUN_ENHANCED and EVAL_COMPARISON):
-        # Comparison mode: trains baseline internally, then enhanced
+    # ── MLP: comparison run (baseline vs enhanced) ──
+    if RUN_BASELINE and RUN_ENHANCED and EVAL_COMPARISON:
         run_comparison(device, logger)
-        # AE always runs in enhanced mode
-        ae_model, ae_history = train_autoencoder(device, logger)
     else:
-        # Standard mode: train all 3 in enhanced config
-        mlp_model, mlp_history = train_mlp(device, logger)
-        cnn_model, cnn_history = train_cnn(device, logger)
-        ae_model,  ae_history  = train_autoencoder(device, logger)
+        train_mlp(device, logger)
+
+    # ── CNN: always trains ──
+    cnn_model, cnn_history = train_cnn(device, logger)
+
+    # ── AE: always trains ──
+    ae_model, ae_history = train_autoencoder(device, logger)
 
     logger.info("=" * 60)
     logger.info("Module 1 Training Complete")
