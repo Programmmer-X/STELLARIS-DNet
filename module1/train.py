@@ -334,7 +334,7 @@ def train_mlp(device, logger, tag: str = EXPERIMENT_TAG):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, epoch, val_loss,
-                            CHECKPOINT_DIR, f"mlp_best_{tag}.pt")
+                            CHECKPOINT_DIR, f"mlp_best_{tag}_v2.pt")
             save_encoder(model.encoder, CHECKPOINT_DIR, "mlp_encoder.pt")
 
         if early_stop(val_loss):
