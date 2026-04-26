@@ -488,49 +488,62 @@ def evaluate_autoencoder(device, logger):
         n_show = 6
         fig, axes = plt.subplots(2, n_show, figsize=(14, 5))
         fig.suptitle("AE — Normal vs Magnetar-like Reconstructions", fontsize=12)
-        for i in range(n_show):
+        with torch.no_grad():                          # ← FIX: wrap in no_grad
+            for i in range(n_show):
             # Normal
-            axes[0, i].plot(all_inputs[i], lw=1.5, label="Input")
-            axes[0, i].plot(all_recons[i], lw=1.5, linestyle="--", label="Recon")
-            axes[0, i].set_title(f"Normal\nerr={all_errors[i]:.4f}", fontsize=8)
-            axes[0, i].axis("off") if i > 0 else axes[0, i].legend(fontsize=6)
-            # Magnetar-like
-            mag_r = model(mag_tensor[i:i+1]).cpu().numpy()[0]
-            axes[1, i].plot(magnetar_like[i], lw=1.5, color="tomato")
-            axes[1, i].plot(mag_r, lw=1.5, linestyle="--", color="navy")
-            axes[1, i].set_title(f"Magnetar-like\nerr={mag_errors[i]:.4f}",
-                                  fontsize=8)
+                axes[0, i].plot(all_inputs[i], lw=1.5, color="steelblue")
+                axes[0, i].plot(all_recons[i], lw=1.5, linestyle="--",
+                               color="navy")
+                axes[0, i].set_title(f"Normal\nerr={all_errors[i]:.4f}",
+                                      fontsize=8)
+                axes[0, i].set_xticks([]); axes[0, i].set_yticks([])
+                # Magnetar-like
+                mag_r = model(mag_tensor[i:i+1]).cpu().numpy()[0]
+                axes[1, i].plot(magnetar_like[i], lw=1.5, color="tomato")
+                axes[1, i].plot(mag_r, lw=1.5, linestyle="--", color="navy")
+                axes[1, i].set_title(f"Magnetar-like\nerr={mag_errors[i]:.4f}",
+                                      fontsize=8)
+                axes[1, i].set_xticks([]); axes[1, i].set_yticks([])
+        if i == 0:
+                    axes[0, 0].legend(["Input", "Recon"], fontsize=6)
         fig.tight_layout()
         _save_plot(fig, "ae_reconstruction_comparison.png")
 
     # ── Latent space PCA ──
     if EVAL_LATENT_VIZ and all_latents.shape[0] >= 10:
         # Mix in anomaly latents for contrast
-        rng     = np.random.default_rng(SEED + 1)
-        mag_lat = model.get_latent(mag_tensor[:50] if EVAL_ANOMALY_VIZ
-                                   else torch.randn(50, AE_INPUT_DIM).to(device)
-                                   ).cpu().numpy()
+        # Build anomaly latents independently — no scope dependency
+        rng = np.random.default_rng(SEED + 1)
+        # Generate fresh anomaly-like inputs for latent comparison
+        anomaly_inputs = np.clip(
+        np.random.default_rng(SEED + 2).normal(0.5, 0.25,
+        (50, AE_INPUT_DIM)), 0, 1
+        ).astype(np.float32)
+        anomaly_tensor = torch.tensor(anomaly_inputs).to(device)
+        with torch.no_grad():                          # ← FIX: wrap in no_grad
+            mag_lat = model.get_latent(anomaly_tensor).cpu().numpy()
 
-        combined  = np.vstack([all_latents[:200], mag_lat])
-        labels_pca = np.array(["Normal"] * min(200, len(all_latents))
-                               + ["Anomaly"] * len(mag_lat))
-
-        pca    = PCA(n_components=2, random_state=SEED)
-        z_2d   = pca.fit_transform(combined)
-        var_r  = pca.explained_variance_ratio_
+        combined   = np.vstack([all_latents[:200], mag_lat])
+        labels_pca = np.array(
+        ["Normal"] * min(200, len(all_latents)) + ["Anomaly"] * len(mag_lat)
+        )
 
         fig, ax = plt.subplots(figsize=(7, 6))
         for grp, color, marker in [("Normal",  "steelblue", "o"),
                                     ("Anomaly", "tomato",    "^")]:
             mask = labels_pca == grp
             ax.scatter(z_2d[mask, 0], z_2d[mask, 1],
-                       c=color, marker=marker, alpha=0.6,
-                       s=20, label=grp)
+                       c=color, marker=marker, alpha=0.6, s=20, label=grp)
+            
         ax.set_xlabel(f"PC1 ({100*var_r[0]:.1f}% var)")
         ax.set_ylabel(f"PC2 ({100*var_r[1]:.1f}% var)")
         ax.set_title("AE — Latent Space PCA (Normal vs Anomaly)")
         ax.legend(); ax.grid(alpha=0.3)
-        _save_plot(fig, "ae_latent_pca.png")
+        _save_plot(fig, "ae_latent_pca.png")   
+
+        pca   = PCA(n_components=2, random_state=SEED)
+        z_2d  = pca.fit_transform(combined)
+        var_r = pca.explained_variance_ratio_
 
     # ── Speed benchmark ──
     if EVAL_SPEED_BENCH:

@@ -623,10 +623,10 @@ def run_comparison(device, logger):
     results["mlp_baseline"] = hist_b
     logger.info(f"Baseline MLP — best val_loss={best_b:.4f} | "
                 f"final F1={hist_b['val_f1'][-1]:.4f}")
-
+    _save_history_json(hist_b, "mlp_baseline") 
     # ── Enhanced MLP ──
     logger.info("── Enhanced MLP ──")
-    _, hist_e = train_mlp(device, logger, tag="enhanced")
+    _, hist_e = train_mlp(device, logger, tag=EXPERIMENT_TAG)
     results["mlp_enhanced"] = hist_e
 
     # ── Comparison plot ──
