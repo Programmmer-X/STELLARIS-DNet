@@ -528,6 +528,10 @@ def evaluate_autoencoder(device, logger):
         ["Normal"] * min(200, len(all_latents)) + ["Anomaly"] * len(mag_lat)
         )
 
+        pca   = PCA(n_components=2, random_state=SEED)
+        z_2d  = pca.fit_transform(combined)
+        var_r = pca.explained_variance_ratio_
+        
         fig, ax = plt.subplots(figsize=(7, 6))
         for grp, color, marker in [("Normal",  "steelblue", "o"),
                                     ("Anomaly", "tomato",    "^")]:
@@ -541,9 +545,6 @@ def evaluate_autoencoder(device, logger):
         ax.legend(); ax.grid(alpha=0.3)
         _save_plot(fig, "ae_latent_pca.png")   
 
-        pca   = PCA(n_components=2, random_state=SEED)
-        z_2d  = pca.fit_transform(combined)
-        var_r = pca.explained_variance_ratio_
 
     # ── Speed benchmark ──
     if EVAL_SPEED_BENCH:
