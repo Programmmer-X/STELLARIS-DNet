@@ -120,13 +120,30 @@ def _bandpass(signal: np.ndarray,
     return np.fft.irfft(fft, n=n, axis=-1).astype(np.float32)
 
 
+def _log_amplitude(spec: np.ndarray, scale: float = 1e6) -> np.ndarray:
+    """
+    Convert linear CQT amplitude to log scale.
+    CRITICAL: Real LIGO data has very small linear amplitude differences.
+    Without log scaling, all spectrograms look identical → model cannot learn.
+
+    log1p(amp * scale) spreads the dynamic range so chirp tracks become visible.
+    scale=1e6 chosen so that typical whitened LIGO amplitudes (1e-6 to 1e-3)
+    map to log values in the range [0, ~14], giving good contrast.
+    """
+    return np.log1p(np.abs(spec) * scale).astype(np.float32)
+
+
 def _normalize_spec(spec: np.ndarray) -> np.ndarray:
-    """Per-channel min-max → ImageNet statistics."""
+    """
+    Per-channel percentile clipping + min-max → ImageNet statistics.
+    Percentile clip (1-99) removes outlier spikes before normalization.
+    """
     result = np.zeros_like(spec, dtype=np.float32)
     for i in range(spec.shape[0]):
-        mn, mx = spec[i].min(), spec[i].max()
-        if mx - mn > 1e-8:
-            result[i] = (spec[i] - mn) / (mx - mn)
+        p_lo = np.percentile(spec[i], 1.0)
+        p_hi = np.percentile(spec[i], 99.0)
+        if p_hi > p_lo:
+            result[i] = np.clip((spec[i] - p_lo) / (p_hi - p_lo), 0.0, 1.0)
     mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
     std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
     return (result - mean) / std
@@ -136,11 +153,19 @@ def signal_to_spectrogram(signal: np.ndarray) -> np.ndarray:
     """
     Full pipeline: raw strain → CQT spectrogram
     Input:  (3, 4096)
-    Output: (3, LIGO_CQT_BINS, LIGO_CQT_STEPS) — normalized
+    Output: (3, LIGO_CQT_BINS, LIGO_CQT_STEPS) — normalized for EfficientNet
+
+    Pipeline:
+      1. Whiten       — removes colored noise floor
+      2. Bandpass     — isolates GW frequency band (20-500 Hz)
+      3. CQT          — log-frequency time-frequency representation
+      4. Log amplitude — CRITICAL: spreads dynamic range so chirp is visible
+      5. Normalize    — percentile clip + ImageNet stats
     """
     signal = _whiten(signal)
     signal = _bandpass(signal)
     spec   = _fast_cqt(signal)
+    spec   = _log_amplitude(spec, scale=1e6)   # ← THE KEY FIX
     spec   = _normalize_spec(spec)
     return spec
 
