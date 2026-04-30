@@ -57,7 +57,7 @@ GEM_LEARNABLE = True              # p is a trainable parameter
 # 2B: ON  — G2Net 4000+ samples (global dependencies useful)
 # ─────────────────────────────────────────────
 USE_TRANSFORMER_2A  = False
-USE_TRANSFORMER_2B  = True
+USE_TRANSFORMER_2B  = False      # OFF — transformer needs >>10K samples to help, not hurt
 TRANSFORMER_DIM     = 256         # project feat_dim → this before transformer
 TRANSFORMER_HEADS   = 8
 TRANSFORMER_LAYERS  = 2
@@ -79,7 +79,7 @@ JET_POWER_LOSS_WEIGHT   = 0.05
 # 2B — GW Chirp Slope Consistency
 # Frequency centroid of predicted signals must rise over time
 # Enforces chirp: f(t) ∝ (t_c − t)^(−3/8)
-USE_CHIRP_LOSS    = True
+USE_CHIRP_LOSS    = False         # OFF — unreliable when model output is at chance
 CHIRP_LOSS_WEIGHT = 0.1
 GW_FREQ_MIN       = 20           # Hz
 GW_FREQ_MAX       = 500          # Hz
@@ -115,23 +115,24 @@ LIGO_N_DETECTORS   = 3
 LIGO_SIGNAL_LEN    = 4096
 LIGO_SAMPLE_RATE   = 2048.0      # Hz
 
-LIGO_CQT_BINS      = 64          # CQT frequency bins
-LIGO_CQT_STEPS     = 64          # CQT time steps
+LIGO_CQT_BINS      = 128         # ↑ from 64 — more freq resolution for chirps
+LIGO_CQT_STEPS     = 128         # ↑ from 64 — more time resolution
+LIGO_CQT_Q        = 20           # ↑ from 8  — sharper frequency resolution (comp standard)
 LIGO_IMG_SIZE      = 224         # EfficientNet input
 
-LIGO_EPOCHS        = 50
+LIGO_EPOCHS        = 60
 LIGO_BATCH_SIZE    = 32
-LIGO_LR            = 1e-4
+LIGO_LR            = 3e-4        # slightly higher to break out of plateau
 LIGO_LR_BACKBONE   = 1e-5
 LIGO_LR_MIN        = 1e-6
-LIGO_WEIGHT_DECAY  = 1e-3
-LIGO_DROPOUT       = 0.4
-LIGO_FREEZE_EPOCHS = 10
+LIGO_WEIGHT_DECAY  = 1e-4        # reduced — less regularization with small dataset
+LIGO_DROPOUT       = 0.3
+LIGO_FREEZE_EPOCHS = 5           # ↓ from 10 — unfreeze backbone faster
 LIGO_WARMUP_EPOCHS = 3
 LIGO_TEST_SPLIT    = 0.15
 LIGO_VAL_SPLIT     = 0.15
 LIGO_ENCODER_DIM   = ENCODER_DIM
-LIGO_MAX_SAMPLES   = 4000        # balanced per-class cap for cache build
+LIGO_MAX_SAMPLES   = 20000       # ↑ from 4000 — 10x more data per class
 
 # ─────────────────────────────────────────────
 # EARLY STOPPING
