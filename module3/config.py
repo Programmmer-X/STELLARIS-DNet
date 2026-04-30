@@ -1,7 +1,6 @@
 """
 module3/config.py
-STELLARIS-DNet — Module 3 Hyperparameters
-Stellar object classification + physical parameter regression.
+STELLARIS-DNet — Module 3 Hyperparameters (v2 upgraded)
 PURE CONSTANTS ONLY — no imports, no logic.
 """
 
@@ -14,16 +13,13 @@ CHECKPOINT_DIR = "checkpoints/module3"
 LOG_DIR        = "logs/module3"
 
 # ─────────────────────────────────────────────
-# DATASET PATHS — Local
+# DATASET PATHS
 # ─────────────────────────────────────────────
-GAIA_PATH    = "data/module3/gaia_dr3.csv"
-SDSS_PATH    = "data/module3/sdss_stars.csv"
-ATNF_PATH    = "data/module3/atnf_catalog.csv"
-MWDD_PATH    = "data/module3/montreal_wd.csv"
+GAIA_PATH = "data/module3/gaia_dr3.csv"
+SDSS_PATH = "data/module3/sdss_stars.csv"
+ATNF_PATH = "data/module3/atnf_catalog.csv"
+MWDD_PATH = "data/module3/montreal_wd.csv"
 
-# ─────────────────────────────────────────────
-# DATASET PATHS — Kaggle
-# ─────────────────────────────────────────────
 KAGGLE_GAIA_PATH = "/kaggle/input/stellaris-module3-data/gaia_dr3.csv"
 KAGGLE_SDSS_PATH = "/kaggle/input/stellaris-module3-data/sdss_stars.csv"
 KAGGLE_ATNF_PATH = "/kaggle/input/stellaris-module3-data/atnf_catalog.csv"
@@ -33,106 +29,111 @@ KAGGLE_MWDD_PATH = "/kaggle/input/stellaris-module3-data/montreal_wd.csv"
 # CLASS DEFINITIONS
 # ─────────────────────────────────────────────
 STELLAR_CLASSES = [
-    "Main_Sequence",    # 0 — H-burning dwarfs
-    "Red_Giant",        # 1 — evolved, expanded
-    "White_Dwarf",      # 2 — degenerate remnant, M < 1.44 M_sun
-    "Neutron_Star",     # 3 — ultra-compact, post-supernova
-    "Quasar",           # 4 — AGN, supermassive BH accretion
+    "Main_Sequence",   # 0
+    "Red_Giant",       # 1
+    "White_Dwarf",     # 2
+    "Neutron_Star",    # 3
+    "Quasar",          # 4
 ]
 NUM_STELLAR_CLASSES = 5
 
 # ─────────────────────────────────────────────
-# DOMAIN IDs  (assigned per data source)
+# FEATURES — v2: 7 physical + 7 validity flags = 14
+# Validity flag = 1 if feature is from real measurement,
+#                 0 if filled / default / placeholder
 # ─────────────────────────────────────────────
-DOMAIN_GAIA      = 0
-DOMAIN_SDSS      = 1
-DOMAIN_ATNF      = 2
-DOMAIN_MWDD      = 3
-DOMAIN_SYNTHETIC = 4
-
-# ─────────────────────────────────────────────
-# FEATURES  — 8 total (7 physical + domain_id)
-# ─────────────────────────────────────────────
-FEATURE_NAMES = [
-    "teff",        # Effective temperature (K)
-    "log_g",       # Surface gravity log10(g / cm s^-2)
-    "feh",         # Metallicity [Fe/H]
-    "abs_mag",     # Absolute magnitude (G-band / V-band)
-    "bp_rp",       # Colour index (Gaia BP-RP or proxy)
-    "redshift",    # Cosmological redshift (0 for galactic objects)
-    "period_ms",   # Spin period in milliseconds (0 for non-pulsars)
-    "domain_id",   # Source domain: 0=Gaia,1=SDSS,2=ATNF,3=MWDD,4=Synthetic
+PHYSICAL_FEATURES = [
+    "teff", "log_g", "feh", "abs_mag", "bp_rp", "redshift", "period_ms",
 ]
-NUM_FEATURES = len(FEATURE_NAMES)    # 8
-
-# ─────────────────────────────────────────────
-# REGRESSION TARGETS — 4 total, all log10-scale
-# ─────────────────────────────────────────────
-REGRESSION_TARGETS = [
-    "log_mass",    # log10(M / M_sun)
-    "log_lum",     # log10(L / L_sun)
-    "log_teff",    # log10(Teff / K)
-    "log_radius",  # log10(R / R_sun)
+VALIDITY_FLAGS = [
+    "valid_teff", "valid_logg", "valid_feh", "valid_absmag",
+    "valid_bprp", "valid_redshift", "valid_periodms",
 ]
-NUM_REGRESSION = len(REGRESSION_TARGETS)    # 4
+FEATURE_NAMES = PHYSICAL_FEATURES + VALIDITY_FLAGS
+NUM_FEATURES  = len(FEATURE_NAMES)              # 14
+NUM_PHYSICAL  = len(PHYSICAL_FEATURES)          # 7
 
 # ─────────────────────────────────────────────
-# REGRESSION OUTPUT BOUNDS  (sigmoid-scaled)
-# MIN + (MAX - MIN) * sigmoid(raw) — gradients
-# flow at boundaries unlike clamp()
+# REGRESSION TARGETS — 4 log10-scale
+# Per-class supervision via reg_mask (computed in dataset.py)
 # ─────────────────────────────────────────────
-LOG_MASS_MIN   = -1.1;  LOG_MASS_MAX   = 10.0   # 0.08 M_sun → BH/QSO
-LOG_LUM_MIN    = -4.0;  LOG_LUM_MAX    = 14.0   # dim WD → bright QSO
-LOG_TEFF_MIN   =  3.2;  LOG_TEFF_MAX   =  7.5   # 1500 K → 30M K (NS)
-LOG_RADIUS_MIN = -4.9;  LOG_RADIUS_MAX =  6.0   # 10 km NS → QSO scale
+REGRESSION_TARGETS = ["log_mass", "log_lum", "log_teff", "log_radius"]
+NUM_REGRESSION     = len(REGRESSION_TARGETS)    # 4
+
+# Per-class regression supervision policy
+# Index: [log_mass, log_lum, log_teff, log_radius]
+# 1 = supervise, 0 = mask out (no loss)
+REG_SUPERVISION_BY_CLASS = {
+    0: [1, 1, 1, 1],   # MS:  all targets supervised
+    1: [1, 1, 1, 1],   # RG:  all targets supervised
+    2: [1, 1, 1, 1],   # WD:  all targets supervised
+    3: [1, 0, 0, 1],   # NS:  only log_mass + log_radius (Teff/Lum from cooling = synthetic)
+    4: [0, 1, 0, 0],   # QSO: only log_lum (from bolometric correction)
+}
 
 # ─────────────────────────────────────────────
-# HR DIAGRAM BOUNDARIES (label assignment)
+# REGRESSION OUTPUT BOUNDS (sigmoid-scaled)
 # ─────────────────────────────────────────────
-LOG_G_MS_BOUNDARY  = 3.5    # log_g > 3.5 → Main Sequence
-LOG_G_WD_BOUNDARY  = 7.0    # log_g > 7.0 → White Dwarf (from Gaia PWD)
-TEFF_RG_MAX        = 5500.0 # K — Red Giants cooler than this
-WD_PROB_THRESHOLD  = 0.9    # Gaia PWD column threshold for WD label
+LOG_MASS_MIN   = -1.1;  LOG_MASS_MAX   = 10.0
+LOG_LUM_MIN    = -4.0;  LOG_LUM_MAX    = 14.0
+LOG_TEFF_MIN   =  3.2;  LOG_TEFF_MAX   =  7.5
+LOG_RADIUS_MIN = -4.9;  LOG_RADIUS_MAX =  6.0
+
+# ─────────────────────────────────────────────
+# HR DIAGRAM LABELLING (Gaia, joint criteria)
+# Drops subgiant branch (ambiguous) → cleaner labels
+# ─────────────────────────────────────────────
+LOG_G_MS_MIN     = 4.0     # log_g > 4.0 + cool enough → MS
+TEFF_MS_MIN      = 3500.0
+TEFF_MS_MAX      = 50000.0
+LOG_LUM_MS_MAX   = 2.0     # MS doesn't exceed log_L = 2
+
+LOG_G_RG_MAX     = 3.5     # log_g < 3.5 → RG
+TEFF_RG_MAX      = 5500.0
+LOG_LUM_RG_MIN   = 1.0     # RG must be luminous
+
+WD_PROB_THRESHOLD = 0.9    # Gaia PWD column
 
 # ─────────────────────────────────────────────
 # FT-TRANSFORMER ARCHITECTURE
 # ─────────────────────────────────────────────
-TRANSFORMER_DIM      = 128   # d_token — embedding dimension per feature
-TRANSFORMER_HEADS    = 8     # multi-head attention heads
-TRANSFORMER_LAYERS   = 4     # transformer encoder depth
-TRANSFORMER_FFN_MULT = 4     # FFN hidden = DIM * FFN_MULT = 512
+TRANSFORMER_DIM      = 128
+TRANSFORMER_HEADS    = 8
+TRANSFORMER_LAYERS   = 4
+TRANSFORMER_FFN_MULT = 4
 TRANSFORMER_DROPOUT  = 0.1
 
-# ─────────────────────────────────────────────
-# HEAD ARCHITECTURE
-# ─────────────────────────────────────────────
 HEAD_HIDDEN_DIMS = [256, 128]
 HEAD_DROPOUT     = 0.3
-ENCODER_DIM      = 256       # CLS projection → unified model compatible
+ENCODER_DIM      = 256
 
 # ─────────────────────────────────────────────
 # TRAINING
 # ─────────────────────────────────────────────
 EPOCHS            = 100
-ACTUAL_BATCH_SIZE = 128      # per forward pass
-ACCUMULATE_STEPS  = 4        # effective batch = 128 × 4 = 512
-WARMUP_EPOCHS     = 10       # linear LR warmup before cosine decay
+ACTUAL_BATCH_SIZE = 128
+ACCUMULATE_STEPS  = 4
+WARMUP_EPOCHS     = 10
 LR                = 1e-4
 WEIGHT_DECAY      = 1e-4
 GRAD_CLIP         = 1.0
-USE_AMP           = False    # set True on Kaggle for faster training
+USE_AMP           = False
 
 # ─────────────────────────────────────────────
 # LOSS WEIGHTS
 # ─────────────────────────────────────────────
-CLASS_LOSS_WEIGHT     = 1.0
-REG_LOSS_WEIGHT       = 0.5
-PHYSICS_LOSS_WEIGHT   = 0.1
-SYNTHETIC_LOSS_WEIGHT = 0.7  # down-weight synthetic samples in loss
+CLASS_LOSS_WEIGHT   = 1.0
+REG_LOSS_WEIGHT     = 0.5
+PHYSICS_LOSS_WEIGHT = 0.1
 
-# Physics loss: Stefan-Boltzmann applied to classes 0,1,2 ONLY
-# Not Quasar (accretion disk) and not Neutron Star (different emission)
-SB_LOSS_CLASSES = [0, 1, 2]
+# ─────────────────────────────────────────────
+# CURRICULUM PHYSICS MASKING (v2 upgrade)
+# Epochs 1 to CURRICULUM_HARD_END  → use true class labels (hard mask)
+# Epochs CURRICULUM_HARD_END to CURRICULUM_SOFT_START → linear blend
+# Epochs > CURRICULUM_SOFT_START → pure soft probs
+# ─────────────────────────────────────────────
+CURRICULUM_HARD_END   = 10   # last epoch using pure true labels
+CURRICULUM_SOFT_START = 30   # first epoch using pure soft probs
 
 # ─────────────────────────────────────────────
 # EARLY STOPPING
@@ -145,29 +146,39 @@ MIN_DELTA = 1e-4
 # ─────────────────────────────────────────────
 TEST_SPLIT    = 0.15
 VAL_SPLIT     = 0.15
-SYNTHETIC_N   = 10000    # per class, only when real data unavailable
-MAX_PER_CLASS = 50000    # cap per class — prevents Gaia MS domination
+MAX_PER_CLASS = 50000
+
+# Synthetic injection — only when class has zero real samples
+# Capped at 10% of mean real class size
+SYNTHETIC_FALLBACK_FRACTION = 0.10
+SYNTHETIC_MIN_PER_CLASS     = 500    # if injecting, at least this many
 
 # ─────────────────────────────────────────────
 # DATA CLEANING BOUNDS
 # ─────────────────────────────────────────────
-TEFF_MIN     = 1500.0    # K
-TEFF_MAX     = 6.0e5     # K
+TEFF_MIN     = 1500.0
+TEFF_MAX     = 6.0e5
 LOGG_MIN     = -1.0
 LOGG_MAX     = 16.0
 FEH_MIN      = -5.0
 FEH_MAX      =  1.0
-MASS_WD_MIN  =  0.17     # M_sun — lowest confirmed WD
-MASS_WD_MAX  =  1.43     # M_sun — just below Chandrasekhar
+MASS_WD_MIN  =  0.17
+MASS_WD_MAX  =  1.43
 
 # ─────────────────────────────────────────────
 # PHYSICAL CONSTANTS
 # ─────────────────────────────────────────────
-CHANDRASEKHAR_LIMIT = 1.44   # M_sun
-NS_MASS_MIN         = 1.1    # M_sun
-NS_MASS_MAX         = 2.5    # M_sun
-TEFF_SUN            = 5778.0 # K
-LOG_TEFF_SUN        = 3.7617 # log10(5778)
-L_SUN               = 3.828e26   # W
-R_SUN               = 6.957e8    # m
-SIGMA_SB            = 5.6704e-8  # W m^-2 K^-4
+CHANDRASEKHAR_LIMIT = 1.44
+NS_MASS_MIN         = 1.1
+NS_MASS_MAX         = 2.5
+TEFF_SUN            = 5778.0
+LOG_TEFF_SUN        = 3.7617
+L_SUN               = 3.828e26
+R_SUN               = 6.957e8
+SIGMA_SB            = 5.6704e-8
+
+# ─────────────────────────────────────────────
+# QSO BOLOMETRIC CORRECTION (Richards et al. 2006)
+# ─────────────────────────────────────────────
+QSO_M_I_SUN     = 4.54     # solar absolute i-band magnitude
+QSO_BOL_CORR    = 0.95     # bolometric correction in log space
