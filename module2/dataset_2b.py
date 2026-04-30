@@ -176,6 +176,44 @@ def signal_to_spectrogram(signal: np.ndarray) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────
+# PUBLIC API — use these in notebooks/evaluate
+# Never import _private functions externally
+# ─────────────────────────────────────────────
+def get_file_path(file_id: str, data_dir: str) -> str:
+    """Public wrapper — returns .npy path for a G2Net sample ID."""
+    return _get_file_path(file_id, data_dir)
+
+
+def spectrogram_for_display(signal: np.ndarray) -> np.ndarray:
+    """
+    Returns CQT spectrogram normalized to [0, 1] for visualization.
+    Unlike signal_to_spectrogram(), does NOT apply ImageNet mean/std.
+    Use this for imshow() — model input uses signal_to_spectrogram().
+
+    Input:  (3, 4096)
+    Output: (3, LIGO_CQT_BINS, LIGO_CQT_STEPS) in [0, 1]
+    """
+    s    = _whiten(signal)
+    s    = _bandpass(s)
+    spec = _fast_cqt(s)
+    spec = _log_amplitude(spec, scale=1e6)
+    result = np.zeros_like(spec)
+    for i in range(spec.shape[0]):
+        mn, mx = spec[i].min(), spec[i].max()
+        if mx > mn:
+            result[i] = np.clip((spec[i] - mn) / (mx - mn), 0, 1)
+    return result.astype(np.float32)
+
+
+def preprocess_signal(signal: np.ndarray) -> np.ndarray:
+    """
+    Returns whitened + bandpassed signal for time-series plotting.
+    Input/Output: (3, 4096)
+    """
+    return _bandpass(_whiten(signal))
+
+
+# ─────────────────────────────────────────────
 # 2. PARALLEL CACHE BUILDER
 # Multiprocessing for maximum throughput
 # ~2-5 min for 4000 samples on Kaggle (4 cores)
