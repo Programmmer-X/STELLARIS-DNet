@@ -472,4 +472,4 @@ if __name__ == "__main__":
     n_cores = os.cpu_count() or 4
     print(f"   20000 samples estimate: "
           f"~{20000*(t1-t0)/60/max(1,n_cores-1):.1f} min "
-          f"({max(1,n_cores-1)} cores)")
+          f"({max(1,n_cores-1)} cores)") 
