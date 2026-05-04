@@ -132,7 +132,7 @@ LIGO_WARMUP_EPOCHS = 3
 LIGO_TEST_SPLIT    = 0.15
 LIGO_VAL_SPLIT     = 0.15
 LIGO_ENCODER_DIM   = ENCODER_DIM
-LIGO_MAX_SAMPLES   = 100000      # ↑ from 20000 — use 100K of 560K available
+LIGO_MAX_SAMPLES   = 90000       # ↓ from 100K — Kaggle free tier RAM limit
 
 # ─────────────────────────────────────────────
 # EARLY STOPPING
