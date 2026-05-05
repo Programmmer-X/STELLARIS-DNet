@@ -38,21 +38,30 @@ STELLAR_CLASSES = [
 NUM_STELLAR_CLASSES = 5
 
 # ─────────────────────────────────────────────
-# FEATURES — v2: 7 physical + 7 validity flags = 14
-# Validity flag = 1 if feature is from real measurement,
-#                 0 if filled / default / placeholder
+# FEATURES — v3: 7 physical features only
+# Validity flags removed (caused domain shortcut)
+# Missing features filled with class-conditional + noise
 # ─────────────────────────────────────────────
 PHYSICAL_FEATURES = [
     "teff", "log_g", "feh", "abs_mag", "bp_rp", "redshift", "period_ms",
 ]
-VALIDITY_FLAGS = [
-    "valid_teff", "valid_logg", "valid_feh", "valid_absmag",
-    "valid_bprp", "valid_redshift", "valid_periodms",
-]
-FEATURE_NAMES = PHYSICAL_FEATURES + VALIDITY_FLAGS
-NUM_FEATURES  = len(FEATURE_NAMES)              # 14
-NUM_PHYSICAL  = len(PHYSICAL_FEATURES)          # 7
+FEATURE_NAMES = PHYSICAL_FEATURES                # 7 only
+NUM_FEATURES  = len(FEATURE_NAMES)               # 7
+NUM_PHYSICAL  = NUM_FEATURES
 
+# ─────────────────────────────────────────────
+# NOISE INJECTION (GPU augmentation in train.py)
+# Applied only during training — not val/test
+# Forces model to learn distributions, not exact values
+# Breaks "constant fill = domain identifier" shortcut
+# ─────────────────────────────────────────────
+NOISE_TEFF_FRAC     = 0.05    # relative noise on teff (5% of value)
+NOISE_LOGG_STD      = 0.10    # absolute std on log_g
+NOISE_FEH_STD       = 0.10    # absolute std on [Fe/H]
+NOISE_ABSMAG_STD    = 0.20    # absolute std on abs_mag
+NOISE_BPRP_STD      = 0.05    # absolute std on bp_rp
+NOISE_REDSHIFT_STD  = 0.02    # absolute std on redshift
+NOISE_PERIODMS_FRAC = 0.05    # relative noise on period_ms
 # ─────────────────────────────────────────────
 # REGRESSION TARGETS — 4 log10-scale
 # Per-class supervision via reg_mask (computed in dataset.py)
@@ -182,3 +191,5 @@ SIGMA_SB            = 5.6704e-8
 # ─────────────────────────────────────────────
 QSO_M_I_SUN     = 4.54     # solar absolute i-band magnitude
 QSO_BOL_CORR    = 0.95     # bolometric correction in log space
+
+
