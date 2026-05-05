@@ -1,14 +1,16 @@
 """
 module3/train.py
-STELLARIS-DNet — Module 3 Training (v2 upgraded)
+STELLARIS-DNet — Module 3 Training (v3)
 FT-Transformer: 5-class classification + 4-param regression + physics loss
 
-v2 upgrades:
+v3 upgrades:
+  - GPU noise injection during training (breaks constant-fill shortcuts)
+  - 7 features only (validity flags removed in dataset.py v3)
+  - reg_mask retained for per-class regression supervision
   - Curriculum physics masking (true labels → soft probs)
-  - reg_mask applied to regression loss (per-class supervision)
-  - is_synthetic removed (no longer needed)
+  - Log-space physics loss (FP16 stable)
 
-Run on Kaggle: python module3/train.py
+Run on Kaggle: import train; train.train(device, logger)
 """
 
 import os
@@ -46,107 +48,117 @@ def get_scheduler(optimizer, warmup_epochs, total_epochs):
 
 # ─────────────────────────────────────────────
 # 2. CURRICULUM SCHEDULE
-# Returns alpha for blending true vs predicted class probs
-#   alpha = 0  → use ground truth labels (hard mask, early training)
-#   alpha = 1  → use predicted softmax (soft mask, late training)
+# alpha = 0 → use ground truth labels (early)
+# alpha = 1 → use predicted softmax (late)
 # ─────────────────────────────────────────────
 def curriculum_alpha(epoch: int) -> float:
     if epoch <= CURRICULUM_HARD_END:
         return 0.0
     if epoch >= CURRICULUM_SOFT_START:
         return 1.0
-    # Linear blend between hard end and soft start
     span = CURRICULUM_SOFT_START - CURRICULUM_HARD_END
     return float(epoch - CURRICULUM_HARD_END) / float(span)
 
 
 # ─────────────────────────────────────────────
-# 3. COMBINED LOSS (v2 — curriculum + reg_mask)
+# 3. NOISE INJECTION (v3 — GPU augmentation)
+# Pre-built noise std vector for the 7 features after StandardScaler.
+# After scaling, features are roughly N(0, 1).
+# Noise applied here is in STANDARDISED space.
+# Order: [teff, log_g, feh, abs_mag, bp_rp, redshift, period_ms]
+# ─────────────────────────────────────────────
+def build_noise_std(device: torch.device) -> torch.Tensor:
+    """
+    Returns (NUM_FEATURES,) tensor of noise stds in standardised space.
+    Roughly std=0.05-0.10 in standardised units = small but meaningful jitter.
+    """
+    noise = torch.tensor([
+        NOISE_TEFF_FRAC,        # teff (relative — but scaled is dimensionless)
+        NOISE_LOGG_STD,         # log_g
+        NOISE_FEH_STD,          # feh
+        NOISE_ABSMAG_STD,       # abs_mag
+        NOISE_BPRP_STD,         # bp_rp
+        NOISE_REDSHIFT_STD,     # redshift
+        NOISE_PERIODMS_FRAC,    # period_ms
+    ], dtype=torch.float32, device=device)
+    return noise
+
+
+def apply_noise(X: torch.Tensor, noise_std: torch.Tensor) -> torch.Tensor:
+    """
+    Adds Gaussian noise per feature, all on GPU.
+    Only called during training — never on val/test.
+    X:         (B, NUM_FEATURES) standardised features
+    noise_std: (NUM_FEATURES,) per-feature std
+    """
+    noise = torch.randn_like(X) * noise_std.unsqueeze(0)
+    return X + noise
+
+
+# ─────────────────────────────────────────────
+# 4. COMBINED LOSS (v3 — log-space physics, mask-aware reg)
 # ─────────────────────────────────────────────
 def compute_loss(
     model:        StellarFTTransformer,
     X:            torch.Tensor,
     y_class:      torch.Tensor,
     y_reg:        torch.Tensor,
-    reg_mask:     torch.Tensor,           # (B, 4) per-target mask
+    reg_mask:     torch.Tensor,
     cls_criterion: nn.CrossEntropyLoss,
     epoch:        int,
     device:       torch.device
 ) -> tuple[torch.Tensor, dict]:
-    """
-    Combined loss = CLASS + REG (masked) + PHYSICS (curriculum-weighted)
-
-    reg_mask: (B, 4) — only supervised targets contribute to regression loss.
-    Physics masking blends true class one-hot and softmax(logits)
-    using curriculum_alpha(epoch).
-    """
     class_logits, reg_out, _ = model(X)
 
-    # ── Classification loss ──────────────────
-    cls_loss = cls_criterion(class_logits, y_class)   # (B,)
+    # ── Classification loss ──
+    cls_loss = cls_criterion(class_logits, y_class)        # (B,)
 
     # ── Regression loss — masked per-target ──
-    # MSE per (sample, target), then mask, then mean over supervised entries
-    reg_se = (reg_out - y_reg) ** 2                    # (B, 4)
-    reg_se = reg_se * reg_mask                         # mask out unsupervised
-    n_supervised = reg_mask.sum().clamp(min=1.0)
-    reg_loss_total = reg_se.sum() / n_supervised       # scalar
-    # Per-sample regression for logging (mean over supervised targets per sample)
-    per_sample_supervised = reg_mask.sum(dim=1).clamp(min=1.0)
-    reg_loss_per = (reg_se.sum(dim=1) / per_sample_supervised)    # (B,)
+    reg_se = (reg_out - y_reg) ** 2                         # (B, 4)
+    reg_se = reg_se * reg_mask                              # mask out unsupervised
+    n_supervised   = reg_mask.sum().clamp(min=1.0)
+    reg_loss_total = reg_se.sum() / n_supervised
+    per_sample_sup = reg_mask.sum(dim=1).clamp(min=1.0)
+    reg_loss_per   = (reg_se.sum(dim=1) / per_sample_sup)   # (B,)
 
-    # ── Physics loss with curriculum masking ─
-    alpha = curriculum_alpha(epoch)
-
-    # Predicted softmax probs
-    probs_pred = torch.softmax(class_logits, dim=1)              # (B, 5)
-    # True class one-hot
-    probs_true = nn.functional.one_hot(
+    # ── Physics loss with curriculum ──
+    alpha       = curriculum_alpha(epoch)
+    probs_pred  = torch.softmax(class_logits, dim=1)
+    probs_true  = nn.functional.one_hot(
         y_class, num_classes=NUM_STELLAR_CLASSES
-    ).float()                                                    # (B, 5)
-    # Curriculum blend
-    probs = alpha * probs_pred + (1.0 - alpha) * probs_true      # (B, 5)
+    ).float()
+    probs       = alpha * probs_pred + (1.0 - alpha) * probs_true
 
-    # Extract regression predictions in linear scale
+    # Log-scale predictions (no exp → FP16 stable)
     log_mass   = reg_out[:, 0]
     log_lum    = reg_out[:, 1]
     log_teff   = reg_out[:, 2]
     log_radius = reg_out[:, 3]
 
-    L_pred = 10 ** log_lum.clamp(LOG_LUM_MIN,    LOG_LUM_MAX)
-    R_pred = 10 ** log_radius.clamp(LOG_RADIUS_MIN, LOG_RADIUS_MAX)
-    T_pred = 10 ** log_teff.clamp(LOG_TEFF_MIN,  LOG_TEFF_MAX)
-    M_pred = 10 ** log_mass.clamp(LOG_MASS_MIN,  LOG_MASS_MAX)
+    # Stefan-Boltzmann (LOG space) — MS + RG + WD only
+    sb_weight      = probs[:, 0] + probs[:, 1] + probs[:, 2]
+    log_L_expected = 2 * log_radius + 4 * (log_teff - LOG_TEFF_SUN)
+    sb_diff        = (log_lum - log_L_expected.detach()) ** 2
+    sb_loss        = sb_weight * sb_diff.clamp(max=100.0)
 
-    # ── Stefan-Boltzmann in LOG space (MS + RG + WD) ─────────
-    # log_L = 2*log_R + 4*(log_T - log_T_sun)
-    sb_weight = probs[:, 0] + probs[:, 1] + probs[:, 2]              # (B,)
-    log_L_expected = 2 * log_radius + 4 * (log_teff - LOG_TEFF_SUN)  # (B,)
-    sb_diff = (log_lum - log_L_expected.detach()) ** 2               # (B,)
-    sb_loss = sb_weight * sb_diff.clamp(max=100.0)                   # (B,)
+    # Mass-Luminosity (LOG space) — MS only
+    ml_weight    = probs[:, 0]
+    log_L_ml_exp = 3.5 * log_mass.clamp(-1.0, 2.0)
+    ml_diff      = (log_lum - log_L_ml_exp.detach()) ** 2
+    ml_loss      = ml_weight * ml_diff.clamp(max=100.0)
 
-    # ── Mass-Luminosity in LOG space (MS only) ───────────────
-    # log_L = 3.5 * log_M
-    ml_weight    = probs[:, 0]                                        # (B,)
-    log_L_ml_exp = 3.5 * log_mass.clamp(-1.0, 2.0)                    # MS mass range
-    ml_diff      = (log_lum - log_L_ml_exp.detach()) ** 2             # (B,)
-    ml_loss      = ml_weight * ml_diff.clamp(max=100.0)               # (B,)
-
-    # ── Chandrasekhar in LOG space (WD only) ─────────────────
-    # log_M must be < log10(1.44)
-    ch_weight   = probs[:, 2]                                          # (B,)
-    log_chandra = math.log10(CHANDRASEKHAR_LIMIT)                      # ~0.158
+    # Chandrasekhar (LOG space) — WD only
+    ch_weight   = probs[:, 2]
+    log_chandra = math.log10(CHANDRASEKHAR_LIMIT)
     ch_loss     = ch_weight * nn.functional.relu(log_mass - log_chandra)
 
-    physics_loss_per = sb_loss + ml_loss + ch_loss                     # (B,)             # (B,)
+    physics_loss_per = sb_loss + ml_loss + ch_loss
 
-    # ── Total per-sample loss ────────────────
     total_per = (
         CLASS_LOSS_WEIGHT   * cls_loss +
         REG_LOSS_WEIGHT     * reg_loss_per +
         PHYSICS_LOSS_WEIGHT * physics_loss_per
     )
-
     total_loss = total_per.mean()
 
     return total_loss, {
@@ -158,7 +170,7 @@ def compute_loss(
 
 
 # ─────────────────────────────────────────────
-# 4. EVAL PASS
+# 5. EVAL (no noise — clean evaluation)
 # ─────────────────────────────────────────────
 @torch.no_grad()
 def evaluate(model, loader, cls_criterion, epoch, device) -> dict:
@@ -188,20 +200,18 @@ def evaluate(model, loader, cls_criterion, epoch, device) -> dict:
 
     n = len(loader)
     return {
-        "loss":    total_loss / n,
-        "cls":     cls_t / n,
-        "reg":     reg_t / n,
-        "physics": phy_t / n,
-        "acc":     correct / total,
+        "loss": total_loss / n, "cls": cls_t / n,
+        "reg": reg_t / n,       "physics": phy_t / n,
+        "acc": correct / total,
     }
 
 
 # ─────────────────────────────────────────────
-# 5. TRAIN
+# 6. TRAIN
 # ─────────────────────────────────────────────
 def train(device, logger):
     logger.info("=" * 55)
-    logger.info("Module 3 Training v2 — StellarFTTransformer")
+    logger.info("Module 3 Training v3 — StellarFTTransformer")
     logger.info("=" * 55)
 
     train_loader, val_loader, _, scaler, class_weights = load_stellar_data()
@@ -209,16 +219,19 @@ def train(device, logger):
     model = StellarFTTransformer().to(device)
     count_parameters(model)
 
-    cw_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
-    cls_criterion = nn.CrossEntropyLoss(weight=cw_tensor, reduction='none')
-
-    optimizer  = torch.optim.AdamW(
+    cw_tensor      = torch.tensor(class_weights, dtype=torch.float32).to(device)
+    cls_criterion  = nn.CrossEntropyLoss(weight=cw_tensor, reduction='none')
+    optimizer      = torch.optim.AdamW(
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
-    scheduler  = get_scheduler(optimizer, WARMUP_EPOCHS, EPOCHS)
-    amp_scaler = GradScaler(enabled=USE_AMP)
-    early_stop = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
-    best_val_loss = float("inf")
+    scheduler      = get_scheduler(optimizer, WARMUP_EPOCHS, EPOCHS)
+    amp_scaler     = GradScaler(enabled=USE_AMP)
+    early_stop     = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
+    best_val_loss  = float("inf")
+
+    # GPU noise std vector (built once)
+    noise_std = build_noise_std(device)
+    logger.info(f"GPU noise std: {noise_std.cpu().numpy().round(3)}")
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -240,10 +253,13 @@ def train(device, logger):
         for step, (X, y_class, y_reg, reg_mask) in enumerate(
             tqdm(train_loader, desc=f"Epoch {epoch:03d}", leave=False)
         ):
-            X        = X.to(device)
-            y_class  = y_class.to(device)
-            y_reg    = y_reg.to(device)
-            reg_mask = reg_mask.to(device)
+            X        = X.to(device, non_blocking=True)
+            y_class  = y_class.to(device, non_blocking=True)
+            y_reg    = y_reg.to(device, non_blocking=True)
+            reg_mask = reg_mask.to(device, non_blocking=True)
+
+            # ── GPU noise injection (training only) ──
+            X = apply_noise(X, noise_std)
 
             with autocast(enabled=USE_AMP):
                 loss, parts = compute_loss(
@@ -268,7 +284,6 @@ def train(device, logger):
             alpha_log   = parts["alpha"]
             step_count += 1
 
-        # Flush leftover accumulated grads
         if step_count % ACCUMULATE_STEPS != 0:
             amp_scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP)
@@ -314,12 +329,10 @@ def train(device, logger):
             )
             save_encoder(model, CHECKPOINT_DIR, "module3_encoder.pt")
 
-            scaler_path = os.path.join(CHECKPOINT_DIR, "module3_scaler.pkl")
-            with open(scaler_path, "wb") as f:
+            with open(os.path.join(CHECKPOINT_DIR, "module3_scaler.pkl"), "wb") as f:
                 pickle.dump(scaler, f)
 
-            scale_path = os.path.join(CHECKPOINT_DIR, "feature_scales.npy")
-            np.save(scale_path,
+            np.save(os.path.join(CHECKPOINT_DIR, "feature_scales.npy"),
                     model.feature_scale.detach().cpu().numpy())
 
             logger.info(f"  ✅ Best — val_loss={best_val_loss:.4f}")
@@ -340,11 +353,11 @@ if __name__ == "__main__":
     device = get_device()
     logger = get_logger("module3_train", LOG_DIR)
 
-    logger.info("STELLARIS-DNet | Module 3 Training v2 Started")
+    logger.info("STELLARIS-DNet | Module 3 Training v3 Started")
     model = train(device, logger)
 
     print("\n" + "=" * 55)
-    print("Module 3 Training v2 Complete")
+    print("Module 3 Training v3 Complete")
     print(f"Checkpoint: {CHECKPOINT_DIR}/module3_best.pt")
     print(f"Encoder:    {CHECKPOINT_DIR}/module3_encoder.pt")
     print(f"Scaler:     {CHECKPOINT_DIR}/module3_scaler.pkl")
