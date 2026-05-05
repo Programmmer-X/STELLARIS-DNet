@@ -118,27 +118,27 @@ def compute_loss(
     T_pred = 10 ** log_teff.clamp(LOG_TEFF_MIN,  LOG_TEFF_MAX)
     M_pred = 10 ** log_mass.clamp(LOG_MASS_MIN,  LOG_MASS_MAX)
 
-    # Stefan-Boltzmann: MS(0) + RG(1) + WD(2) only
-    sb_weight = probs[:, 0] + probs[:, 1] + probs[:, 2]
-    R_si       = R_pred * R_SUN
-    L_expected = (4 * math.pi * R_si ** 2 * SIGMA_SB * T_pred ** 4) / L_SUN
-    sb_diff    = (L_pred - L_expected.detach()) ** 2
-    sb_loss    = sb_weight * sb_diff.clamp(max=1e6) / (L_SUN ** 2 + 1e-10)
-    sb_loss    = sb_loss.clamp(max=10.0)
+    # ── Stefan-Boltzmann in LOG space (MS + RG + WD) ─────────
+    # log_L = 2*log_R + 4*(log_T - log_T_sun)
+    sb_weight = probs[:, 0] + probs[:, 1] + probs[:, 2]              # (B,)
+    log_L_expected = 2 * log_radius + 4 * (log_teff - LOG_TEFF_SUN)  # (B,)
+    sb_diff = (log_lum - log_L_expected.detach()) ** 2               # (B,)
+    sb_loss = sb_weight * sb_diff.clamp(max=100.0)                   # (B,)
 
-    # Mass-Luminosity (MS only)
-    ml_weight = probs[:, 0]
-    M_clamped = M_pred.clamp(0.1, 100)
-    L_ml_exp  = M_clamped ** 3.5
-    ml_diff   = (L_pred - L_ml_exp.detach()) ** 2
-    ml_loss   = ml_weight * ml_diff.clamp(max=1e6) / (L_SUN + 1e-10)
-    ml_loss   = ml_loss.clamp(max=10.0)
+    # ── Mass-Luminosity in LOG space (MS only) ───────────────
+    # log_L = 3.5 * log_M
+    ml_weight    = probs[:, 0]                                        # (B,)
+    log_L_ml_exp = 3.5 * log_mass.clamp(-1.0, 2.0)                    # MS mass range
+    ml_diff      = (log_lum - log_L_ml_exp.detach()) ** 2             # (B,)
+    ml_loss      = ml_weight * ml_diff.clamp(max=100.0)               # (B,)
 
-    # Chandrasekhar (WD only)
-    ch_weight = probs[:, 2]
-    ch_loss   = ch_weight * nn.functional.relu(M_pred - CHANDRASEKHAR_LIMIT)
+    # ── Chandrasekhar in LOG space (WD only) ─────────────────
+    # log_M must be < log10(1.44)
+    ch_weight   = probs[:, 2]                                          # (B,)
+    log_chandra = math.log10(CHANDRASEKHAR_LIMIT)                      # ~0.158
+    ch_loss     = ch_weight * nn.functional.relu(log_mass - log_chandra)
 
-    physics_loss_per = sb_loss + ml_loss + ch_loss              # (B,)
+    physics_loss_per = sb_loss + ml_loss + ch_loss                     # (B,)             # (B,)
 
     # ── Total per-sample loss ────────────────
     total_per = (
