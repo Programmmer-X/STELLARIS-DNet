@@ -27,19 +27,26 @@ from module3.config import *
 # ─────────────────────────────────────────────
 # PATH RESOLVER
 # ─────────────────────────────────────────────
-def _resolve_paths() -> dict:
-    paths = {}
-    mapping = {
-        "gaia": (KAGGLE_GAIA_PATH, GAIA_PATH),
-        "sdss": (KAGGLE_SDSS_PATH, SDSS_PATH),
-        "atnf": (KAGGLE_ATNF_PATH, ATNF_PATH),
-        "mwdd": (KAGGLE_MWDD_PATH, MWDD_PATH),
+def _resolve_paths():
+    """Resolve dataset paths (Kaggle vs local auto-detect)"""
+
+    is_kaggle = os.path.exists("/kaggle/input")
+
+    def pick(kaggle_path, local_path):
+        if is_kaggle and kaggle_path and os.path.exists(kaggle_path):
+            return kaggle_path
+        if (not is_kaggle) and local_path and os.path.exists(local_path):
+            return local_path
+        return None
+
+    print(f"[ENV] Kaggle={is_kaggle}")
+
+    return {
+        "gaia": pick(KAGGLE_GAIA_PATH, GAIA_PATH),
+        "sdss": pick(KAGGLE_SDSS_PATH, SDSS_PATH),
+        "atnf": pick(KAGGLE_ATNF_PATH, ATNF_PATH),
+        "mwdd": pick(KAGGLE_MWDD_PATH, MWDD_PATH),
     }
-    for key, (k, l) in mapping.items():
-        paths[key] = k if os.path.exists(k) else (l if os.path.exists(l) else None)
-    return paths
-
-
 # ─────────────────────────────────────────────
 # 1. PYTORCH DATASET
 # Returns: (X, y_class, y_reg, reg_mask)
@@ -409,6 +416,22 @@ def _build_reg_mask(df: pd.DataFrame) -> np.ndarray:
 # ─────────────────────────────────────────────
 def load_stellar_data(use_synthetic_fallback: bool = True) -> tuple:
     paths  = _resolve_paths()
+     
+    # ─────────────────────────────────────────────
+    # HARD FAIL: ensure real datasets are present
+    # ─────────────────────────────────────────────
+    print("\n[DATA SOURCE CHECK — dataset.py]")
+    for name, path in paths.items():
+        exists = (path is not None) and os.path.exists(path)
+        print(f"  {name:5s}: {path} | exists={exists}")
+
+    if not any(path and os.path.exists(path) for path in paths.values()):
+        raise RuntimeError(
+            "❌ No real datasets found.\n"
+            "Refusing to train on synthetic data.\n"
+            "Fix your DATA_ROOT / Kaggle paths."
+        )
+
     frames = []
 
     for name, fn in [("gaia", _load_gaia), ("sdss", _load_sdss),

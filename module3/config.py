@@ -192,4 +192,7 @@ SIGMA_SB            = 5.6704e-8
 QSO_M_I_SUN     = 4.54     # solar absolute i-band magnitude
 QSO_BOL_CORR    = 0.95     # bolometric correction in log space
 
+# v3.1: feature dropout for sparse features (redshift, period_ms)
+SPARSE_DROPOUT_PROB    = 0.3   # probability of zeroing per batch
+SPARSE_FEATURE_INDICES = [5, 6]   # redshift, period_ms in standardised X
 

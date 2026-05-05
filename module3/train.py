@@ -86,14 +86,19 @@ def build_noise_std(device: torch.device) -> torch.Tensor:
 
 def apply_noise(X: torch.Tensor, noise_std: torch.Tensor) -> torch.Tensor:
     """
-    Adds Gaussian noise per feature, all on GPU.
-    Only called during training — never on val/test.
-    X:         (B, NUM_FEATURES) standardised features
-    noise_std: (NUM_FEATURES,) per-feature std
+    Adds Gaussian noise + random dropout on sparse features.
+    Training-only.
     """
+    # Standard Gaussian noise
     noise = torch.randn_like(X) * noise_std.unsqueeze(0)
-    return X + noise
+    X = X + noise
 
+    # Sparse feature dropout — randomly zero redshift / period_ms per batch
+    for idx in SPARSE_FEATURE_INDICES:
+        if torch.rand(1, device=X.device).item() < SPARSE_DROPOUT_PROB:
+            X[:, idx] = 0.0
+
+    return X
 
 # ─────────────────────────────────────────────
 # 4. COMBINED LOSS (v3 — log-space physics, mask-aware reg)
@@ -136,21 +141,29 @@ def compute_loss(
     log_radius = reg_out[:, 3]
 
     # Stefan-Boltzmann (LOG space) — MS + RG + WD only
+    # Mask physics losses by regression target availability
+    sb_valid = reg_mask[:, 1] * reg_mask[:, 2] * reg_mask[:, 3]
+    ml_valid = reg_mask[:, 0] * reg_mask[:, 1]
+    ch_valid = reg_mask[:, 0]
+
+    sb_loss = sb_weight * sb_diff.clamp(max=100.0) * sb_valid
+    ml_loss = ml_weight * ml_diff.clamp(max=100.0) * ml_valid
+    ch_loss = ch_weight * nn.functional.relu(log_mass - log_chandra) * ch_valid
     sb_weight      = probs[:, 0] + probs[:, 1] + probs[:, 2]
     log_L_expected = 2 * log_radius + 4 * (log_teff - LOG_TEFF_SUN)
     sb_diff        = (log_lum - log_L_expected.detach()) ** 2
-    sb_loss        = sb_weight * sb_diff.clamp(max=100.0)
+    
 
     # Mass-Luminosity (LOG space) — MS only
     ml_weight    = probs[:, 0]
     log_L_ml_exp = 3.5 * log_mass.clamp(-1.0, 2.0)
     ml_diff      = (log_lum - log_L_ml_exp.detach()) ** 2
-    ml_loss      = ml_weight * ml_diff.clamp(max=100.0)
+   
 
     # Chandrasekhar (LOG space) — WD only
     ch_weight   = probs[:, 2]
     log_chandra = math.log10(CHANDRASEKHAR_LIMIT)
-    ch_loss     = ch_weight * nn.functional.relu(log_mass - log_chandra)
+    
 
     physics_loss_per = sb_loss + ml_loss + ch_loss
 
