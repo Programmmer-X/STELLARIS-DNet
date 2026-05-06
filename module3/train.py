@@ -126,7 +126,7 @@ def compute_loss(
     per_sample_sup = reg_mask.sum(dim=1).clamp(min=1.0)
     reg_loss_per   = (reg_se.sum(dim=1) / per_sample_sup)   # (B,)
 
-    # ── Physics loss with curriculum ──
+    # ── Physics loss with curriculum + reg_mask gating ──
     alpha       = curriculum_alpha(epoch)
     probs_pred  = torch.softmax(class_logits, dim=1)
     probs_true  = nn.functional.one_hot(
@@ -140,30 +140,30 @@ def compute_loss(
     log_teff   = reg_out[:, 2]
     log_radius = reg_out[:, 3]
 
-    # Stefan-Boltzmann (LOG space) — MS + RG + WD only
-    # Mask physics losses by regression target availability
-    sb_valid = reg_mask[:, 1] * reg_mask[:, 2] * reg_mask[:, 3]
-    ml_valid = reg_mask[:, 0] * reg_mask[:, 1]
-    ch_valid = reg_mask[:, 0]
+    # Class-probability gates — which physical law applies to this class
+    sb_weight = probs[:, 0] + probs[:, 1] + probs[:, 2]   # MS + RG + WD
+    ml_weight = probs[:, 0]                                # MS only
+    ch_weight = probs[:, 2]                                # WD only
 
-    sb_loss = sb_weight * sb_diff.clamp(max=100.0) * sb_valid
-    ml_loss = ml_weight * ml_diff.clamp(max=100.0) * ml_valid
-    ch_loss = ch_weight * nn.functional.relu(log_mass - log_chandra) * ch_valid
-    sb_weight      = probs[:, 0] + probs[:, 1] + probs[:, 2]
+    # reg_mask gates — only enforce when the targets in question are supervised
+    # REGRESSION_TARGETS = [log_mass, log_lum, log_teff, log_radius]  (idx 0,1,2,3)
+    sb_valid = reg_mask[:, 1] * reg_mask[:, 2] * reg_mask[:, 3]   # needs L, T, R
+    ml_valid = reg_mask[:, 0] * reg_mask[:, 1]                    # needs M, L
+    ch_valid = reg_mask[:, 0]                                     # needs M
+
+    # Stefan-Boltzmann (log space)
     log_L_expected = 2 * log_radius + 4 * (log_teff - LOG_TEFF_SUN)
     sb_diff        = (log_lum - log_L_expected.detach()) ** 2
-    
+    sb_loss        = sb_weight * sb_diff.clamp(max=100.0) * sb_valid
 
-    # Mass-Luminosity (LOG space) — MS only
-    ml_weight    = probs[:, 0]
+    # Mass-Luminosity (log space)
     log_L_ml_exp = 3.5 * log_mass.clamp(-1.0, 2.0)
     ml_diff      = (log_lum - log_L_ml_exp.detach()) ** 2
-   
+    ml_loss      = ml_weight * ml_diff.clamp(max=100.0) * ml_valid
 
-    # Chandrasekhar (LOG space) — WD only
-    ch_weight   = probs[:, 2]
+    # Chandrasekhar (log space)
     log_chandra = math.log10(CHANDRASEKHAR_LIMIT)
-    
+    ch_loss     = ch_weight * nn.functional.relu(log_mass - log_chandra) * ch_valid
 
     physics_loss_per = sb_loss + ml_loss + ch_loss
 
