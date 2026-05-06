@@ -20,7 +20,7 @@ import pickle
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -238,7 +238,7 @@ def train(device, logger):
         model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY
     )
     scheduler      = get_scheduler(optimizer, WARMUP_EPOCHS, EPOCHS)
-    amp_scaler     = GradScaler(enabled=USE_AMP)
+    amp_scaler = GradScaler('cuda', enabled=USE_AMP)
     early_stop     = EarlyStopping(patience=PATIENCE, min_delta=MIN_DELTA)
     best_val_loss  = float("inf")
 
@@ -274,7 +274,7 @@ def train(device, logger):
             # ── GPU noise injection (training only) ──
             X = apply_noise(X, noise_std)
 
-            with autocast(enabled=USE_AMP):
+            with autocast('cuda', enabled=USE_AMP):
                 loss, parts = compute_loss(
                     model, X, y_class, y_reg, reg_mask,
                     cls_criterion, epoch, device
