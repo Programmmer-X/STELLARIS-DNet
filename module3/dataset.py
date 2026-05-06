@@ -95,27 +95,31 @@ def _empty_row_template(n: int) -> dict:
 def _load_gaia(path: str) -> pd.DataFrame | None:
     if not path or not os.path.exists(path):
         return None
-    print("Loading Gaia DR3...")
+    print("Loading Gaia DR3 (v4 — CMD labelling)...")
 
     df_raw = pd.read_csv(path, usecols=[
         'Teff', 'logg', '[Fe/H]', 'GMAG',
         'BPmag', 'RPmag', 'Rad', 'Lum-Flame',
         'Mass-Flame', 'PWD'
     ])
-    df_raw = df_raw.dropna(subset=['Teff', 'logg'])
+
+    # CMD inputs are mandatory — drop rows missing photometry
+    df_raw['bp_rp'] = df_raw['BPmag'] - df_raw['RPmag']
+    df_raw = df_raw.dropna(subset=['GMAG', 'bp_rp']).reset_index(drop=True)
     n = len(df_raw)
     out = _empty_row_template(n)
 
-    out['teff']    = df_raw['Teff'].values
-    out['log_g']   = df_raw['logg'].values
+    # Physical features (log_g, teff, feh kept as inputs — model has them but
+    # cannot use them to recover the label, since label is now CMD-derived)
+    out['teff']    = df_raw['Teff'].fillna(5778.0).values
+    out['log_g']   = df_raw['logg'].fillna(4.4).values
     out['feh']     = df_raw['[Fe/H]'].fillna(0.0).values
-    out['abs_mag'] = df_raw['GMAG'].fillna(0.0).values
-    out['bp_rp']   = (df_raw['BPmag'] - df_raw['RPmag']).fillna(0.0).values
-    # redshift, period_ms remain at zero (defaults)
+    out['abs_mag'] = df_raw['GMAG'].values
+    out['bp_rp']   = df_raw['bp_rp'].values
 
-    # Regression targets
+    # Regression targets — unchanged logic
     out['log_teff'] = np.log10(np.clip(out['teff'], TEFF_MIN, TEFF_MAX))
-    out['log_lum']  = np.where(
+    out['log_lum'] = np.where(
         df_raw['Lum-Flame'].notna(),
         np.log10(df_raw['Lum-Flame'].clip(1e-6, 1e14)), np.nan
     )
@@ -128,32 +132,47 @@ def _load_gaia(path: str) -> pd.DataFrame | None:
         np.log10(df_raw['Rad'].clip(1e-5, 1e6)), np.nan
     )
 
-    # Joint HR labelling
-    label = np.full(n, -1, dtype=np.int64)
-    teff    = out['teff']
-    log_g   = out['log_g']
-    log_lum = out['log_lum']
+    # ── CMD-based labelling ─────────────────────────────
+    bp_rp   = out['bp_rp']
+    abs_mag = out['abs_mag']
     pwd     = df_raw['PWD'].fillna(0).values
 
+    # MS ridge: empirical Gaia HRD main-sequence quadratic
+    ms_ridge = (
+        CMD_MS_RIDGE_C0
+        + CMD_MS_RIDGE_C1 * bp_rp
+        + CMD_MS_RIDGE_C2 * bp_rp**2
+    )
+    delta = abs_mag - ms_ridge   # +ve = below ridge (faint), −ve = above (bright)
+
+    in_range = (bp_rp >= CMD_BPRP_MIN) & (bp_rp <= CMD_BPRP_MAX)
+    label = np.full(n, -1, dtype=np.int64)
+
+    # Priority 1 — WD via Gaia probability
     is_wd = (pwd > WD_PROB_THRESHOLD)
     label[is_wd] = 2
 
-    log_lum_safe = np.where(np.isnan(log_lum), 0.0, log_lum)
+    # Priority 2 — RG: ≥1.5 mag brighter than MS ridge, redder than 0.5
+    is_rg = (
+        (delta < CMD_RG_OFFSET) &
+        (bp_rp > 0.5) &
+        in_range & (~is_wd)
+    )
+    label[is_rg] = 1
+
+    # Priority 3 — MS: within MS band of ridge
     is_ms = (
-        (log_g > LOG_G_MS_MIN) &
-        (teff > TEFF_MS_MIN) & (teff < TEFF_MS_MAX) &
-        (log_lum_safe < LOG_LUM_MS_MAX) &
-        (~is_wd)
+        (np.abs(delta) <= CMD_MS_HALFWIDTH) &
+        in_range & (~is_wd) & (~is_rg)
     )
     label[is_ms] = 0
 
-    is_rg = (
-        (log_g < LOG_G_RG_MAX) &
-        (teff < TEFF_RG_MAX) &
-        (log_lum_safe > LOG_LUM_RG_MIN) &
-        (~is_wd) & (~is_ms)
-    )
-    label[is_rg] = 1
+    # Subgiants & off-track stars: KEEP, don't drop. Default to MS.
+    # These are the samples that v3 dropped (212k) — now we retain them and
+    # let the model handle the natural CMD fuzziness.
+    n_amb_before = (label == -1).sum()
+    is_amb = (label == -1) & in_range
+    label[is_amb] = 0
 
     out['label'] = label
     df_out = pd.DataFrame(out)
@@ -162,11 +181,13 @@ def _load_gaia(path: str) -> pd.DataFrame | None:
     n_ms = (df_out['label'] == 0).sum()
     n_rg = (df_out['label'] == 1).sum()
     n_wd = (df_out['label'] == 2).sum()
+    n_amb_kept = is_amb.sum()
     n_dropped = n - len(df_out)
-    print(f"  Gaia: {len(df_out):,} kept | MS={n_ms:,} RG={n_rg:,} WD={n_wd:,}")
-    print(f"        ({n_dropped:,} ambiguous samples dropped)")
+    print(f"  Gaia: {len(df_out):,} kept | "
+          f"MS={n_ms:,} (incl. {n_amb_kept:,} ambiguous) "
+          f"RG={n_rg:,} WD={n_wd:,}")
+    print(f"        ({n_dropped:,} samples outside CMD bp_rp range)")
     return df_out
-
 
 # ─────────────────────────────────────────────
 # 3. SDSS LOADER (v3)

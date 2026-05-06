@@ -86,20 +86,22 @@ def build_noise_std(device: torch.device) -> torch.Tensor:
 
 def apply_noise(X: torch.Tensor, noise_std: torch.Tensor) -> torch.Tensor:
     """
-    Adds Gaussian noise + random dropout on sparse features.
-    Training-only.
+    Training-only feature augmentation:
+    1. Gaussian noise on every feature (existing v3 behaviour)
+    2. Sparse-feature dropout on redshift + period_ms (Path C — v4)
+       Forces the model to NOT rely on the deterministic NS/QSO identifier.
     """
-    # Standard Gaussian noise
+    # 1. Gaussian noise
     noise = torch.randn_like(X) * noise_std.unsqueeze(0)
     X = X + noise
 
-    # Sparse feature dropout — randomly zero redshift / period_ms per batch
-    for idx in SPARSE_FEATURE_INDICES:
-        if torch.rand(1, device=X.device).item() < SPARSE_DROPOUT_PROB:
-            X[:, idx] = 0.0
+    # 2. Sparse-feature dropout (zero with probability SPARSE_DROPOUT_PROB)
+    if SPARSE_DROPOUT_PROB > 0:
+        for idx in SPARSE_DROPOUT_IDX:
+            keep = (torch.rand(X.size(0), device=X.device) > SPARSE_DROPOUT_PROB)
+            X[:, idx] = X[:, idx] * keep.float()
 
     return X
-
 # ─────────────────────────────────────────────
 # 4. COMBINED LOSS (v3 — log-space physics, mask-aware reg)
 # ─────────────────────────────────────────────

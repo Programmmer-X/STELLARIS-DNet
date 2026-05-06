@@ -38,6 +38,32 @@ STELLAR_CLASSES = [
 NUM_STELLAR_CLASSES = 5
 
 # ─────────────────────────────────────────────
+# CMD-BASED HR LABELLING (Path C — v4)
+# Replaces log_g/teff/log_lum threshold cuts.
+# MS ridge fit to empirical Gaia HRD:
+#   M_G = C0 + C1·bp_rp + C2·bp_rp²
+# Verified against canonical points:
+#   (bp_rp=0.0, M_G≈0.5)  A0V
+#   (bp_rp=0.8, M_G≈4.7)  G2V (Sun)
+#   (bp_rp=2.5, M_G≈11.0) M3V
+# ─────────────────────────────────────────────
+CMD_MS_RIDGE_C0   =  0.50
+CMD_MS_RIDGE_C1   =  5.75
+CMD_MS_RIDGE_C2   = -0.62
+CMD_MS_HALFWIDTH  =  2.0    # MS band = ridge ± 2 mag
+CMD_RG_OFFSET     = -1.5    # RG = ≥1.5 mag brighter than ridge
+CMD_BPRP_MIN      = -0.2
+CMD_BPRP_MAX      =  4.0
+
+# ─────────────────────────────────────────────
+# SPARSE-FEATURE DROPOUT (Path C)
+# Breaks the deterministic redshift/period_ms identifier shortcut.
+# Applied only in apply_noise() — training only, not val/test.
+# ─────────────────────────────────────────────
+SPARSE_DROPOUT_PROB = 0.3
+SPARSE_DROPOUT_IDX  = [5, 6]   # redshift, period_ms (FEATURE_NAMES order)
+
+# ─────────────────────────────────────────────
 # FEATURES — v3: 7 physical features only
 # Validity flags removed (caused domain shortcut)
 # Missing features filled with class-conditional + noise
@@ -192,7 +218,5 @@ SIGMA_SB            = 5.6704e-8
 QSO_M_I_SUN     = 4.54     # solar absolute i-band magnitude
 QSO_BOL_CORR    = 0.95     # bolometric correction in log space
 
-# v3.1: feature dropout for sparse features (redshift, period_ms)
-SPARSE_DROPOUT_PROB    = 0.3   # probability of zeroing per batch
-SPARSE_FEATURE_INDICES = [5, 6]   # redshift, period_ms in standardised X
+
 
