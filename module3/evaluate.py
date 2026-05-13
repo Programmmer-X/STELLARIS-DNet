@@ -413,7 +413,8 @@ def plot_feature_scales(model):
     scales = model.feature_scale.detach().cpu().numpy()
 
     # Two colours: physical features vs validity flags
-    colors = ["steelblue"] * NUM_PHYSICAL + ["darkorange"] * len(VALIDITY_FLAGS)
+    # colors = ["steelblue"] * NUM_PHYSICAL + ["darkorange"] * len(VALIDITY_FLAGS)
+    colors = ["steelblue"] * NUM_FEATURES
 
     fig, ax = plt.subplots(figsize=(11, 4))
     bars = ax.bar(range(NUM_FEATURES), scales,
