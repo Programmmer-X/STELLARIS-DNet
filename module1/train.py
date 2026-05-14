@@ -448,16 +448,12 @@ def train_cnn(device, logger, tag: str = EXPERIMENT_TAG):
             best_val_loss = val_loss
             save_checkpoint(model, optimizer, epoch, val_loss,
                             CHECKPOINT_DIR, f"cnn_best_{tag}.pt")
-            # Save full encoder (conv_encoder + time_proj + freq_fusion)
-            # This is the fix: save the encode() subgraph, not just conv_encoder
-            save_encoder(
-                nn.Sequential(
-                    model.conv_encoder,
-                    model.pool,
-                    model.time_proj,
-                ),
-                CHECKPOINT_DIR, "cnn_encoder.pt"
-            )
+            # Save full model state_dict as encoder checkpoint.
+            # PulsarCNN.encode() uses conv_encoder → temporal_attn →
+            # pool → squeeze → time_proj → freq_fusion — this path
+            # cannot be captured as nn.Sequential. Unified loader
+            # instantiates PulsarCNN() and calls .encode() directly.
+            save_encoder(model, CHECKPOINT_DIR, "cnn_encoder.pt")
 
         if early_stop(val_loss):
             break
