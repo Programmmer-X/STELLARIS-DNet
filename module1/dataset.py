@@ -214,6 +214,12 @@ def load_htru2(path: str = HTRU2_PATH):
     X_val   = scaler.transform(X_val)
     X_test  = scaler.transform(X_test)
 
+    import pickle
+    scaler_path = os.path.join(CHECKPOINT_DIR, "mlp_scaler.pkl")
+    with open(scaler_path, "wb") as f:
+       pickle.dump(scaler, f)
+    print(f"💾 MLP scaler saved → {scaler_path}")
+
     classes       = np.unique(y_train)
     class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
     pos_weight    = torch.tensor(
